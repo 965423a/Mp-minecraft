@@ -19,3 +19,5 @@ kernel/build/
 *.log
 tmp/
 server/run/
+__pycache__/
+*.pyc
