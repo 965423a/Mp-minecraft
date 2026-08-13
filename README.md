@@ -1,5 +1,7 @@
 # Mp-minecraft — 从 0 到 1:自研系统上的 Minecraft 服务器核心
 
+一个由 Rust + C 语言编写的 Minecraft 系统:从硬件驱动出发尽力减少性能损耗,
+并对多 CPU(Multiprocessor)场景做底层 NUMA 与各方面优化。
 用 Rust(为主)+ C(底层热路径)从零实现一个操作系统,并在这个系统上完整复刻
 Minecraft 服务器核心,最终打包成可引导 ISO,引导后自动拉起服务器。
 
@@ -32,4 +34,3 @@ iso/
 
 ## 授权
 
-完全开源。
