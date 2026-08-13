@@ -316,6 +316,9 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     log!("memory map: {mem} bytes total usable");
     log!("VGA text mode ready, COM1 ready");
 
+    // ---------------- EULA 第一步 ----------------
+    let accepted = eula_prompt(&mut vga);
+
     // ---------------- 安装界面 ----------------
     vga.set_cursor(3, 0);
     let _ = writeln!(vga, "================================================================");
@@ -325,6 +328,7 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     let _ = writeln!(vga, "   Memory:   {:.1} MiB usable", mem as f64 / 1048576.0);
     let _ = writeln!(vga, "   Protocol: 775  (Minecraft Java 26.1.2)");
     let _ = writeln!(vga, "   World:    superflat / normal terrain generator");
+    let _ = writeln!(vga, "   EULA:     {}", if accepted { "accepted" } else { "rejected" });
     let _ = writeln!(vga, "");
     let _ = writeln!(vga, "   [1] Install system to disk");
     let _ = writeln!(vga, "   [2] Boot Mp-minecraft server");
@@ -351,6 +355,48 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
                 0x04 => {
                     // 3
                     log!("reboot selected");
+                    reboot();
+                }
+                _ => {}
+            }
+        }
+        sleep(5);
+    }
+}
+
+/// EULA 第一步:按 Y 接受进入安装/启动,N 拒绝重启。
+fn eula_prompt(vga: &mut Vga) -> bool {
+    vga.clear();
+    vga.set_cursor(3, 0);
+    let _ = writeln!(vga, "================================================================");
+    let _ = writeln!(vga, "                    MINECRAFT END USER LICENSE");
+    let _ = writeln!(vga, "                    AGREEMENT (EULA)");
+    let _ = writeln!(vga, "================================================================");
+    let _ = writeln!(vga, "");
+    let _ = writeln!(vga, "   By accepting you agree to the Minecraft EULA");
+    let _ = writeln!(vga, "   (https://aka.ms/MinecraftEULA).");
+    let _ = writeln!(vga, "");
+    let _ = writeln!(vga, "   This system installs and runs a Minecraft server.");
+    let _ = writeln!(vga, "   Your use of Minecraft is subject to the EULA.");
+    let _ = writeln!(vga, "");
+    let _ = writeln!(vga, "   [Y] I agree to the EULA");
+    let _ = writeln!(vga, "   [N] I do not agree (reboot)");
+    let _ = writeln!(vga, "");
+    loop {
+        if let Some(sc) = poll_scancode() {
+            match sc {
+                0x15 => {
+                    // Y
+                    log!("EULA accepted");
+                    let _ = writeln!(vga, "   EULA accepted.");
+                    sleep_short();
+                    return true;
+                }
+                0x31 => {
+                    // N
+                    log!("EULA rejected, rebooting");
+                    let _ = writeln!(vga, "   EULA rejected, rebooting...");
+                    sleep_short();
                     reboot();
                 }
                 _ => {}
