@@ -3,7 +3,7 @@
 fn main() {
     cc::Build::new()
         .file("src/boot.S")
-        .target("x86_64-unknown-none")
+        .target("x86_64-mcs.json")
         .flag("-m64")
         .compile("mcs_boot");
     println!("cargo:rerun-if-changed=src/boot.S");
