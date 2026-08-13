@@ -31,17 +31,46 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    /// 默认配置内容(首次运行时写入)。
+    /// 默认配置内容(首次运行时写入,与原版属性名一致)。
     pub const fn default_properties() -> &'static str {
         "# Mp-minecraft server.properties\n\
+         # 与原版 jar 服务器一致;修改后重启生效\n\
          seed=0\n\
+         level-name=world\n\
          level-type=normal\n\
+         gamemode=survival\n\
+         difficulty=easy\n\
          server-port=25565\n\
          motd=A Mp-minecraft Server\n\
          max-players=20\n\
          spawn-protection=0\n\
          view-distance=8\n\
-         online-mode=false\n"
+         online-mode=false\n\
+         pvp=true\n\
+         allow-flight=false\n\
+         white-list=false\n\
+         generate-structures=true\n\
+         enable-command-block=false\n\
+         max-tick-time=60000\n"
+    }
+
+    /// 首次运行建立原版 jar 布局的辅助文件。
+    pub fn init_vanilla_files(root: &Path) {
+        let _ = fs::create_dir_all(root);
+        let eula = root.join("eula.txt");
+        if !eula.exists() {
+            let _ = fs::write(
+                &eula,
+                "# By changing the setting below to TRUE you are indicating your agreement to our EULA\n\
+                 eula=true\n",
+            );
+        }
+        for f in ["ops.json", "whitelist.json", "banned-players.json", "banned-ips.json"] {
+            let p = root.join(f);
+            if !p.exists() {
+                let _ = fs::write(&p, "[]\n");
+            }
+        }
     }
 
     pub fn load_or_create(config_dir: &Path) -> Self {

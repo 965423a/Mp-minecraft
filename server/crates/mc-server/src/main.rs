@@ -40,6 +40,11 @@ fn main() -> ExitCode {
     let log_dir = root.join("logs");
     let world_dir = root.join("world");
 
+    ServerConfig::init_vanilla_files(&root);
+    let _ = std::fs::create_dir_all(&bin_dir);
+    let _ = std::fs::create_dir_all(&config_dir);
+    let _ = std::fs::create_dir_all(&world_dir);
+
     if log.open(&log_dir).is_err() {
         eprintln!("[ERROR] cannot open log dir {}", log_dir.display());
     }
