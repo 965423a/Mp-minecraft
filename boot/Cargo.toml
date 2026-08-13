@@ -1,0 +1,23 @@
+[package]
+name = "mcs-kernel"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "mcs_kernel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mcs-kernel"
+path = "src/main.rs"
+
+[build-dependencies]
+cc = { version = "1", features = ["parallel"] }
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+codegen-units = 1
+debug = false
+strip = "debuginfo"

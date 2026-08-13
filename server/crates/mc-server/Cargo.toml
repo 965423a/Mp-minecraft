@@ -1,0 +1,14 @@
+[package]
+name = "mc-server"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "mc-server"
+path = "src/main.rs"
+
+[dependencies]
+mc-world = { workspace = true }
+mc-protocol = { workspace = true }
+mc-hotpath = { workspace = true }

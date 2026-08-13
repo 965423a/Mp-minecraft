@@ -1,6 +1,8 @@
 //! Configuration state 包(1.20.2+ 强制经过)。
 
 use crate::buf::{ReadBuf, Result, WriteBuf};
+use alloc::string::String;
+use alloc::vec::Vec;
 
 pub mod clientbound {
     use super::*;
@@ -128,7 +130,7 @@ pub mod serverbound {
     }
 
     /// Plugin Message (0x02)。
-    pub fn read_plugin_message(r: &mut ReadBuf) -> Result<(String, &[u8])> {
+    pub fn read_plugin_message<'a>(r: &'a mut ReadBuf<'a>) -> Result<(String, &'a [u8])> {
         let channel = r.read_string()?;
         let data = r.read_bytes(r.remaining())?;
         Ok((channel, data))

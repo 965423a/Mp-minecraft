@@ -1,6 +1,8 @@
 //! Login state 包(协议 775:Login Success 仅含 Game Profile,无 Session ID)。
 
 use crate::buf::{ReadBuf, Result, WriteBuf};
+use alloc::string::String;
+use alloc::vec::Vec;
 
 pub mod clientbound {
     use super::*;

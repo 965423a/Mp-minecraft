@@ -1,9 +1,13 @@
 //! Play state 包(仅实现服务器需要的最小集合)。
 
 use crate::buf::{ReadBuf, Result, WriteBuf};
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 
 pub mod clientbound {
     use super::*;
+    use alloc::vec;
 
     pub const ID_JOIN_GAME: i32 = 0x31;
     pub const ID_CHUNK_DATA: i32 = 0x2D;
@@ -140,6 +144,7 @@ pub mod clientbound {
 
 pub mod serverbound {
     use super::*;
+    use alloc::vec;
 
     pub const ID_CONFIRM_TELEPORTATION: i32 = 0x00;
     pub const ID_KEEP_ALIVE: i32 = 0x1C;
@@ -197,7 +202,8 @@ pub mod serverbound {
 #[cfg(test)]
 mod tests {
     use super::clientbound::*;
-    use crate::buf::ReadBuf;
+    use crate::buf::{ReadBuf, WriteBuf};
+    use alloc::vec;
 
     #[test]
     fn join_game_encodes() {

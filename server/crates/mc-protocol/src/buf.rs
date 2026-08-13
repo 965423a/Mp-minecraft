@@ -2,6 +2,8 @@
 //! `WriteBuf` 用于编码发送的包,`ReadBuf` 用于解码收到的包。
 
 use crate::varint;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -173,6 +175,10 @@ impl<'a> ReadBuf<'a> {
         let b = self.buf.get(self.pos).ok_or(Error::EndOfBuffer)?;
         self.pos += 1;
         Ok(*b)
+    }
+
+    pub fn read_i8(&mut self) -> Result<i8> {
+        Ok(self.read_u8()? as i8)
     }
 
     pub fn read_bool(&mut self) -> Result<bool> {

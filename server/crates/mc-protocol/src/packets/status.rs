@@ -1,6 +1,8 @@
 //! Status state 包。
 
 use crate::buf::{ReadBuf, Result, WriteBuf};
+use alloc::string::String;
+use alloc::vec::Vec;
 
 pub mod clientbound {
     use super::*;

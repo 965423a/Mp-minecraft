@@ -18,3 +18,4 @@ kernel/build/
 # 日志与临时文件
 *.log
 tmp/
+server/run/

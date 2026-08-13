@@ -1,4 +1,6 @@
 //! VarInt / VarLong 编解码。
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// 将一个 u32 编码为 VarInt 写入 `out`,返回写入字节数。
 pub fn write_varint(mut value: u32, out: &mut Vec<u8>) -> usize {
