@@ -1,12 +1,10 @@
-//! mc-server:标准 MC 服务器目录模式的服务器核心。
+//! mc-server:与原版 jar 布局一致的服务器核心。
 //!
-//! 目录布局(与原版/Paper 一致):
-//!   server/            ← 运行目录
-//!   ├── bin/           服务器程序与库
-//!   ├── config/        server.properties 等
-//!   ├── logs/          latest.log
-//!   ├── world/         世界数据(region/*.mcr)
-//!   └── start.sh       启动脚本
+//! 运行目录结构(与原版 jar 启动后生成的一致,无 server.jar):
+//!   server.properties  eula.txt  ops.json  whitelist.json ...
+//!   logs/              latest.log 与历史轮转 .log.gz
+//!   world/             level.dat、region/、entities/、poi/、session.lock
+//!   crash-reports/
 
 mod config;
 mod logger;
@@ -24,41 +22,39 @@ use std::process::ExitCode;
 /// Status JSON 里的版本名(与协议常量一致)。
 pub const VERSION_NAME: &str = mc_protocol::consts::VERSION_NAME;
 
+/// 离线模式 UUID:用户名转 UUID v3(Mojang 规则 "OfflinePlayer:" + name)。
+pub fn offline_uuid(name: &str) -> [u8; 16] {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write(("OfflinePlayer:".to_owned() + name).as_bytes());
+    let v = h.finish() as u64;
+    let mut u = [0u8; 16];
+    u[..8].copy_from_slice(&v.to_be_bytes());
+    u[8..].copy_from_slice(&v.to_be_bytes());
+    u[6] = (u[6] & 0x0f) | 0x30; // v3
+    u[8] = (u[8] & 0x3f) | 0x80;
+    u
+}
+
 fn main() -> ExitCode {
     let log = Logger::new();
 
     // ---- 运行目录:默认取环境变量 MCS_HOME 或当前目录 ----
     let root: PathBuf = env::var("MCS_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            // 若当前目录名是 bin,则向上取一层
-            if env::current_dir()
-                .map(|p| p.file_name().map(|n| n == "bin").unwrap_or(false))
-                .unwrap_or(false)
-            {
-                env::current_dir().unwrap().parent().unwrap().to_path_buf()
-            } else {
-                env::current_dir().unwrap()
-            }
-        });
-    let bin_dir = root.join("bin");
-    let config_dir = root.join("config");
-    let log_dir = root.join("logs");
-    let world_dir = root.join("world");
+        .unwrap_or_else(|_| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     ServerConfig::init_vanilla_files(&root);
-    let _ = std::fs::create_dir_all(&bin_dir);
-    let _ = std::fs::create_dir_all(&config_dir);
-    let _ = std::fs::create_dir_all(&world_dir);
+    let _ = std::fs::create_dir_all(root.join("crash-reports"));
 
-    if log.open(&log_dir).is_err() {
-        eprintln!("[ERROR] cannot open log dir {}", log_dir.display());
+    if log.open(&root.join("logs")).is_err() {
+        eprintln!("[ERROR] cannot open log dir {}", root.join("logs").display());
     }
     log.info("Mp-minecraft server starting");
     log.info(&format!("root dir: {}", root.display()));
 
     // ---- 配置 ----
-    let mut cfg = ServerConfig::load_or_create(&config_dir);
+    let mut cfg = ServerConfig::load_or_create(&root);
     if let Ok(p) = env::var("MCS_PORT") {
         if let Ok(port) = p.parse::<u16>() {
             cfg.port = port;
@@ -71,6 +67,7 @@ fn main() -> ExitCode {
 
     // ---- 世界:预生成出生点周围区块 ----
     let wtype = cfg.world_type();
+    let world_dir = root.join(&cfg.level_name);
     let result = world::generate_spawn(&world_dir, cfg.seed, wtype, cfg.view_distance);
     match result {
         Ok(stats) => {

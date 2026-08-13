@@ -1,9 +1,8 @@
-//! 连接状态机:Handshake → Status / Login → Play。
-//! 当前实现:Handshake 识别意图,Status 完整(响应列表与 Ping/Pong)。
+//! 连接状态机:Handshake → Status / Login → Configuration → Play。
 
 use crate::network::{send_packet, ConnReader};
-use mc_protocol::buf::ReadBuf;
-use mc_protocol::consts::{intent, PROTOCOL_VERSION, State};
+use mc_protocol::buf::{ReadBuf, WriteBuf};
+use mc_protocol::consts::{intent, COMPRESSION_THRESHOLD, PROTOCOL_VERSION, State};
 use std::io;
 use std::net::TcpStream;
 
@@ -25,7 +24,6 @@ impl ConnInfo {
     }
 }
 
-/// 处理一个客户端连接,直到断开。
 pub fn handle_connection(
     mut stream: TcpStream,
     port: u16,
@@ -51,24 +49,28 @@ pub fn handle_connection(
                 }
             }
             State::Status => {
-                handle_status(&mut stream, packet_id, &mut r, motd, max_players, port)?;
+                handle_status(&mut stream, packet_id, &mut r, motd, max_players)?;
                 if packet_id == 0x01 {
-                    return Ok(()); // Ping 后断开
+                    return Ok(());
                 }
             }
             State::Login => {
-                let _ = &mut r;
-                return Ok(()); // 后续实现
+                if !handle_login(&mut stream, &mut conn, packet_id, &mut r)? {
+                    return Ok(());
+                }
             }
-            State::Play | State::Configuration => {
-                let _ = &mut r;
-                return Ok(());
+            State::Configuration => {
+                if !handle_configuration(&mut stream, &mut conn, packet_id, &mut r)? {
+                    return Ok(());
+                }
+            }
+            State::Play => {
+                handle_play(&mut stream, packet_id, &mut r)?;
             }
         }
     }
 }
 
-/// Handshake (0x00):协议版本 + 地址 + 端口 + 意图。
 fn handle_handshake(conn: &mut ConnInfo, packet_id: i32, r: &mut ReadBuf) -> bool {
     if packet_id != 0x00 {
         return false;
@@ -96,14 +98,12 @@ fn handle_handshake(conn: &mut ConnInfo, packet_id: i32, r: &mut ReadBuf) -> boo
     true
 }
 
-/// Status:Request (0x00) → Response;Ping (0x01) → Pong。
 fn handle_status(
     stream: &mut TcpStream,
     packet_id: i32,
     r: &mut ReadBuf,
     motd: &str,
     max_players: i32,
-    port: u16,
 ) -> io::Result<()> {
     match packet_id {
         0x00 => {
@@ -117,7 +117,7 @@ fn handle_status(
                  \"favicon\":null}}",
                 crate::VERSION_NAME, PROTOCOL_VERSION, max_players, motd
             );
-            let mut p = mc_protocol::buf::WriteBuf::new();
+            let mut p = WriteBuf::new();
             mc_protocol::packets::status::clientbound::write_response(&mut p, &json);
             send_packet(stream, &p.into_bytes())
         }
@@ -125,10 +125,125 @@ fn handle_status(
             let Ok(timestamp) = r.read_i64() else {
                 return Ok(());
             };
-            let mut p = mc_protocol::buf::WriteBuf::new();
+            let mut p = WriteBuf::new();
             mc_protocol::packets::status::clientbound::write_pong(&mut p, timestamp);
             send_packet(stream, &p.into_bytes())
         }
         _ => Ok(()),
     }
+}
+
+fn handle_login(
+    stream: &mut TcpStream,
+    conn: &mut ConnInfo,
+    packet_id: i32,
+    r: &mut ReadBuf,
+) -> io::Result<bool> {
+    match packet_id {
+        0x00 => {
+            let Ok(start) = mc_protocol::packets::login::serverbound::read_login_start(r) else {
+                return Ok(false);
+            };
+            if conn.protocol_version != PROTOCOL_VERSION {
+                send_disconnect(
+                    stream,
+                    &format!(
+                        "{{\"text\":\"Unsupported protocol version {}. Expected {}\"}}",
+                        conn.protocol_version, PROTOCOL_VERSION
+                    ),
+                )?;
+                return Ok(false);
+            }
+            let mut p = WriteBuf::new();
+            mc_protocol::packets::login::clientbound::write_set_compression(
+                &mut p,
+                COMPRESSION_THRESHOLD,
+            );
+            send_packet(stream, &p.into_bytes())?;
+
+            let mut uuid = start.uuid;
+            if uuid == [0u8; 16] {
+                uuid = crate::offline_uuid(&start.name);
+            }
+            let mut p = WriteBuf::new();
+            mc_protocol::packets::login::clientbound::write_success(&mut p, uuid, &start.name, &[]);
+            send_packet(stream, &p.into_bytes())?;
+            log_join(conn, &start.name, uuid);
+            Ok(true)
+        }
+        0x03 => {
+            conn.state = State::Configuration;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn handle_configuration(
+    stream: &mut TcpStream,
+    conn: &mut ConnInfo,
+    packet_id: i32,
+    r: &mut ReadBuf,
+) -> io::Result<bool> {
+    use mc_protocol::packets::configuration;
+    match packet_id {
+        configuration::serverbound::ID_CLIENT_INFORMATION => {
+            let _ = configuration::serverbound::read_client_information(r);
+            conn.state = State::Configuration;
+            Ok(true)
+        }
+        configuration::serverbound::ID_KNOWN_PACKS => {
+            let mut p = WriteBuf::new();
+            configuration::clientbound::write_known_packs(&mut p, &[]);
+            send_packet(stream, &p.into_bytes())?;
+            let mut p = WriteBuf::new();
+            configuration::clientbound::write_registry_data(
+                &mut p,
+                "minecraft:worldgen/biome",
+                &[],
+            );
+            send_packet(stream, &p.into_bytes())?;
+            let mut p = WriteBuf::new();
+            configuration::clientbound::write_feature_flags(&mut p, &[]);
+            send_packet(stream, &p.into_bytes())?;
+            let mut p = WriteBuf::new();
+            configuration::clientbound::write_update_tags_empty(&mut p);
+            send_packet(stream, &p.into_bytes())?;
+            let mut p = WriteBuf::new();
+            configuration::clientbound::write_finish_configuration(&mut p);
+            send_packet(stream, &p.into_bytes())?;
+            Ok(true)
+        }
+        configuration::serverbound::ID_ACK_FINISH_CONFIGURATION => {
+            conn.state = State::Play;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn handle_play(stream: &mut TcpStream, packet_id: i32, r: &mut ReadBuf) -> io::Result<bool> {
+    let _ = stream;
+    match packet_id {
+        mc_protocol::packets::play::serverbound::ID_CONFIRM_TELEPORTATION => {
+            let _ = mc_protocol::packets::play::serverbound::read_confirm_teleportation(r);
+            Ok(true)
+        }
+        _ => Ok(true),
+    }
+}
+
+fn send_disconnect(stream: &mut TcpStream, reason_json: &str) -> io::Result<()> {
+    let mut p = WriteBuf::new();
+    mc_protocol::packets::login::clientbound::write_disconnect(&mut p, reason_json);
+    send_packet(stream, &p.into_bytes())
+}
+
+fn log_join(conn: &ConnInfo, name: &str, uuid: [u8; 16]) {
+    let hex = uuid
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join("");
+    eprintln!("[player] {name} ({hex}) logged in from {}({})", conn.host, conn.port);
 }

@@ -6,6 +6,7 @@ use std::path::Path;
 
 pub struct ServerConfig {
     pub seed: u64,
+    pub level_name: String,
     pub world_type: String,
     pub port: u16,
     pub motd: String,
@@ -19,6 +20,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
             seed: 0, // 0 = 随机
+            level_name: "world".to_string(),
             world_type: "normal".to_string(),
             port: 25565,
             motd: "A Mp-minecraft Server".to_string(),
@@ -31,41 +33,85 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    /// 默认配置内容(首次运行时写入,与原版属性名一致)。
+    /// 默认配置内容(首次运行时写入,与原版 jar 生成的属性键完全一致)。
     pub const fn default_properties() -> &'static str {
-        "# Mp-minecraft server.properties\n\
-         # 与原版 jar 服务器一致;修改后重启生效\n\
-         seed=0\n\
-         level-name=world\n\
-         level-type=normal\n\
+        "#Minecraft server properties\n\
+         enable-jmx-monitoring=false\n\
+         rcon.port=25575\n\
+         level-seed=\n\
          gamemode=survival\n\
-         difficulty=easy\n\
-         server-port=25565\n\
-         motd=A Mp-minecraft Server\n\
-         max-players=20\n\
-         spawn-protection=0\n\
-         view-distance=8\n\
-         online-mode=false\n\
-         pvp=true\n\
-         allow-flight=false\n\
-         white-list=false\n\
-         generate-structures=true\n\
          enable-command-block=false\n\
-         max-tick-time=60000\n"
+         enable-query=false\n\
+         generator-settings={}\n\
+         enforce-secure-profile=false\n\
+         level-name=world\n\
+         motd=A Mp-minecraft Server\n\
+         query.port=25565\n\
+         pvp=true\n\
+         generate-structures=true\n\
+         max-chained-neighbor-updates=1000000\n\
+         difficulty=easy\n\
+         network-compression-threshold=256\n\
+         max-tick-time=60000\n\
+         require-resource-pack=false\n\
+         use-native-transport=true\n\
+         max-players=20\n\
+         online-mode=false\n\
+         enable-status=true\n\
+         allow-flight=false\n\
+         initial-disabled-packs=\n\
+         broadcast-rcon-to-ops=true\n\
+         view-distance=8\n\
+         server-ip=\n\
+         resource-pack-prompt=\n\
+         allow-nether=true\n\
+         server-port=25565\n\
+         enable-rcon=false\n\
+         sync-chunk-writes=true\n\
+         op-permission-level=4\n\
+         prevent-proxy-connections=false\n\
+         hide-online-players=false\n\
+         resource-pack=\n\
+         entity-broadcast-range-percentage=100\n\
+         simulation-distance=8\n\
+         rcon.password=\n\
+         player-idle-timeout=0\n\
+         force-gamemode=false\n\
+         rate-limit=0\n\
+         hardcore=false\n\
+         white-list=false\n\
+         broadcast-console-to-ops=true\n\
+         spawn-npcs=true\n\
+         spawn-animals=true\n\
+         log-ips=true\n\
+         function-permission-level=2\n\
+         level-type=minecraft\\:normal\n\
+         text-filtering-config=\n\
+         spawn-monsters=true\n\
+         enforce-whitelist=false\n\
+         spawn-protection=0\n\
+         max-world-size=29999984\n"
     }
 
-    /// 首次运行建立原版 jar 布局的辅助文件。
+    /// 首次运行建立与原版 jar 布局一致的文件(eula、白名单、缓存等)。
     pub fn init_vanilla_files(root: &Path) {
         let _ = fs::create_dir_all(root);
         let eula = root.join("eula.txt");
         if !eula.exists() {
             let _ = fs::write(
                 &eula,
-                "# By changing the setting below to TRUE you are indicating your agreement to our EULA\n\
+                "#By changing the setting below to TRUE you are indicating your agreement to our EULA\n\
                  eula=true\n",
             );
         }
-        for f in ["ops.json", "whitelist.json", "banned-players.json", "banned-ips.json"] {
+        for f in [
+            "ops.json",
+            "whitelist.json",
+            "banned-players.json",
+            "banned-ips.json",
+            "usercache.json",
+            "usernamecache.json",
+        ] {
             let p = root.join(f);
             if !p.exists() {
                 let _ = fs::write(&p, "[]\n");
@@ -73,12 +119,10 @@ impl ServerConfig {
         }
     }
 
-    pub fn load_or_create(config_dir: &Path) -> Self {
-        let path = config_dir.join("server.properties");
+    pub fn load_or_create(root: &Path) -> Self {
+        let path = root.join("server.properties");
         if !path.exists() {
-            if let Some(p) = path.parent() {
-                let _ = fs::create_dir_all(p);
-            }
+            let _ = fs::create_dir_all(root);
             let _ = fs::write(&path, Self::default_properties());
         }
         let mut cfg = ServerConfig::default();
@@ -93,9 +137,10 @@ impl ServerConfig {
                     None => continue,
                 };
                 match k {
-                    "seed" => {
+                    "level-seed" | "seed" => {
                         cfg.seed = v.parse::<u64>().unwrap_or(0);
                     }
+                    "level-name" => cfg.level_name = v.to_string(),
                     "level-type" => cfg.world_type = v.to_string(),
                     "server-port" => {
                         cfg.port = v.parse::<u16>().unwrap_or(25565);
@@ -124,7 +169,7 @@ impl ServerConfig {
 
     pub fn world_type(&self) -> mc_world::generator::WorldType {
         match self.world_type.as_str() {
-            "superflat" => mc_world::generator::WorldType::Superflat,
+            "superflat" | "minecraft\\:superflat" => mc_world::generator::WorldType::Superflat,
             _ => mc_world::generator::WorldType::Normal,
         }
     }

@@ -12,3 +12,4 @@ path = "src/main.rs"
 mc-world = { workspace = true }
 mc-protocol = { workspace = true }
 mc-hotpath = { workspace = true }
+flate2 = "1"

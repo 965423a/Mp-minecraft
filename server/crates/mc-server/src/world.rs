@@ -21,7 +21,13 @@ pub fn generate_spawn(
     wtype: WorldType,
     radius_chunks: i32,
 ) -> io::Result<WorldStats> {
-    std::fs::create_dir_all(world_dir)?;
+    std::fs::create_dir_all(world_dir.join("region"))?;
+    std::fs::create_dir_all(world_dir.join("entities"))?;
+    std::fs::create_dir_all(world_dir.join("poi"))?;
+    let lock = world_dir.join("session.lock");
+    if !lock.exists() {
+        let _ = std::fs::write(&lock, b"");
+    }
     let coords: Vec<(i32, i32)> = (-radius_chunks..=radius_chunks)
         .flat_map(|cx| (-radius_chunks..=radius_chunks).map(move |cz| (cx, cz)))
         .collect();
