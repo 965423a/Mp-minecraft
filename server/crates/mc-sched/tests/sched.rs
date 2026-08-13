@@ -23,12 +23,11 @@ fn work_stealing_balances_load() {
 #[test]
 fn idle_cpu_steals_instead_of_watching() {
     let sch = Scheduler::new(4, 2);
-    let tasks: Vec<Task> = (0..64)
-        .map(|id| Task { id, cost: 5 })
-        .collect();
-    sch.submit(tasks);
+    for id in 0..64 {
+        sch.submit_to(0, Task { id, cost: 5 });
+    }
     let stats = sch.run(8);
-    let steals: usize = stats.iter().map(|s| s.3).sum();
+    let steals: usize = stats.iter().map(|s| s.3 + s.4).sum();
     assert!(steals > 0, "应有窃取发生,否则有空转核围观");
     let per_cpu: Vec<usize> = stats.iter().map(|s| s.2).collect();
     assert!(per_cpu.iter().all(|&v| v > 0), "存在空转围观核: {per_cpu:?}");
@@ -37,33 +36,28 @@ fn idle_cpu_steals_instead_of_watching() {
 #[test]
 fn local_node_steal_preferred() {
     let sch = Scheduler::new(2, 2);
-    let tasks: Vec<Task> = (0..8).map(|id| Task { id, cost: 2 }).collect();
-    sch.submit(tasks);
-    let stats = sch.run(4);
-    let cpu_node: Vec<usize> = stats.iter().map(|s| s.1).collect();
-    let done: Vec<usize> = stats.iter().map(|s| s.2).collect();
-    for node in 0..2 {
-        let node_done: usize = cpu_node
-            .iter()
-            .zip(done.iter())
-            .filter(|(n, _)| **n == node)
-            .map(|(_, d)| *d)
-            .sum();
-        assert_eq!(node_done, 4, "node {node} 完成数应等于其初始任务数");
+    for id in 0..8 {
+        sch.submit_to(0, Task { id, cost: 2 });
     }
+    let stats = sch.run(2);
+    let local: usize = stats.iter().map(|s| s.3).sum();
+    let remote: usize = stats.iter().map(|s| s.4).sum();
+    assert!(local > 0, "同 node 邻居应通过窃取获得任务");
+    assert_eq!(remote, 0, "仅 node0 核运行时不应跨 node 窃取");
+    assert_eq!(stats[1].2, 4, "cpu1 应窃取一半任务");
+    assert_eq!(stats.iter().map(|s| s.2).sum::<usize>(), 8);
 }
 
 #[test]
 fn deep_imbalance_gets_remote_help() {
     let sch = Scheduler::new(2, 2);
-    let tasks: Vec<Task> = (0..8)
-        .map(|id| Task { id, cost: 20 })
-        .collect();
-    sch.submit(tasks);
+    for id in 0..8 {
+        sch.submit_to(0, Task { id, cost: 20 });
+    }
     let stats = sch.run(4);
-    let remote: usize = stats.iter().map(|s| s.3).sum();
-    let _ = remote;
+    let remote: usize = stats.iter().map(|s| s.4).sum();
+    assert!(remote > 0, "node1 核应跨 node 窃取帮忙");
     let per_cpu: Vec<usize> = stats.iter().map(|s| s.2).collect();
-    assert!(per_cpu.iter().all(|&v| v > 0));
-    assert!(per_cpu.iter().sum::<usize>() == 8);
+    assert!(per_cpu.iter().all(|&v| v > 0), "跨 node 核应通过窃取帮忙: {per_cpu:?}");
+    assert_eq!(per_cpu.iter().sum::<usize>(), 8);
 }

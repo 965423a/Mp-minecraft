@@ -79,12 +79,16 @@ impl Scheduler {
         let cpus = self.cpus.len();
         for t in tasks {
             let cpu = t.id % cpus;
-            self.cpus[cpu].queue.lock().unwrap().push_back(t);
-            self.total.fetch_add(1, Ordering::Relaxed);
+            self.submit_to(cpu, t);
         }
     }
 
-    pub fn run(&self, workers: usize) -> Vec<(usize, usize, usize, usize)> {
+    pub fn submit_to(&self, cpu: usize, task: Task) {
+        self.cpus[cpu].queue.lock().unwrap().push_back(task);
+        self.total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn run(&self, workers: usize) -> Vec<(usize, usize, usize, usize, usize)> {
         let done_total = AtomicUsize::new(0);
         self.running.store(true, Ordering::SeqCst);
         std::thread::scope(|s| {
@@ -105,8 +109,8 @@ impl Scheduler {
                     c,
                     self.topology.node_of(c),
                     self.cpus[c].done.load(Ordering::Relaxed),
-                    self.cpus[c].local_steals.load(Ordering::Relaxed)
-                        + self.cpus[c].remote_steals.load(Ordering::Relaxed),
+                    self.cpus[c].local_steals.load(Ordering::Relaxed),
+                    self.cpus[c].remote_steals.load(Ordering::Relaxed),
                 )
             })
             .collect()

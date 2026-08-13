@@ -27,7 +27,7 @@ fn main() {
         let stats = sch.run(n_cpu);
         let elapsed = t0.elapsed().as_micros();
         let done: Vec<usize> = stats.iter().map(|s| s.2).collect();
-        let steals: Vec<usize> = stats.iter().map(|s| s.3).collect();
+        let steals: Vec<usize> = stats.iter().map(|s| s.3 + s.4).collect();
         let per_node: Vec<usize> = (0..nodes)
             .map(|n| stats.iter().filter(|s| s.1 == n).map(|s| s.2).sum())
             .collect();
