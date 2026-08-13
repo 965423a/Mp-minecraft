@@ -4,6 +4,7 @@ members = [
     "crates/mc-protocol",
     "crates/mc-world",
     "crates/mc-hotpath",
+    "crates/mc-sched",
     "crates/mc-server",
 ]
 

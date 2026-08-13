@@ -14,6 +14,7 @@ pub struct WorldStats {
 }
 
 /// 预生成出生点周围 (2r+1)² 个区块,保存到 world/region/。
+/// 多线程并行:区块之间无依赖,按 CPU 数分块生成;保存按 region 分组并行写盘。
 pub fn generate_spawn(
     world_dir: &Path,
     seed: u64,
@@ -21,31 +22,68 @@ pub fn generate_spawn(
     radius_chunks: i32,
 ) -> io::Result<WorldStats> {
     std::fs::create_dir_all(world_dir)?;
-    let generator = mc_world::generator::WorldGenerator::new(seed, wtype);
+    let coords: Vec<(i32, i32)> = (-radius_chunks..=radius_chunks)
+        .flat_map(|cx| (-radius_chunks..=radius_chunks).map(move |cz| (cx, cz)))
+        .collect();
+    let threads = std::env::var("MCS_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        })
+        .min(coords.len());
+
+    let chunks: Vec<mc_world::Chunk> = std::thread::scope(|s| {
+        let per = coords.len().div_ceil(threads);
+        let handles: Vec<_> = coords
+            .chunks(per)
+            .map(|part| {
+                let generator = WorldGenerator::new(seed, wtype);
+                s.spawn(move || part.iter().map(|&(cx, cz)| generator.generate(cx, cz)).collect::<Vec<_>>())
+            })
+            .collect();
+        let mut out = Vec::with_capacity(coords.len());
+        for h in handles {
+            out.extend(h.join().expect("chunk worker panicked"));
+        }
+        out
+    });
+
     let mut total_blocks = 0usize;
     let mut total_surface = 0i64;
-    let mut samples = 0i64;
-
-    for cx in -radius_chunks..=radius_chunks {
-        for cz in -radius_chunks..=radius_chunks {
-            let chunk = generator.generate(cx, cz);
-            total_blocks += chunk.block_count();
-            // 表面高度采样(每区块中心一列)
-            let h = chunk.height_at(8, 8);
-            total_surface += h as i64;
-            samples += 1;
-            RegionFile::save(world_dir, &chunk, seed, wtype)?;
-        }
+    for c in &chunks {
+        total_blocks += c.block_count();
+        total_surface += c.height_at(8, 8) as i64;
     }
+    let mean_surface = (total_surface / chunks.len() as i64) as i32;
+
+    let regions = {
+        let mut m: std::collections::HashMap<(i32, i32), Vec<&mc_world::Chunk>> =
+            std::collections::HashMap::new();
+        for c in &chunks {
+            m.entry((c.cx.div_euclid(32), c.cz.div_euclid(32))).or_default().push(c);
+        }
+        m
+    };
+    std::thread::scope(|s| {
+        for cs in regions.into_values() {
+            s.spawn(move || {
+                for c in cs {
+                    RegionFile::save(world_dir, c, seed, wtype)?;
+                }
+                Ok::<(), io::Error>(())
+            });
+        }
+    });
     let files = RegionFile::count_files(world_dir)?;
+    eprintln!("[parallel] {threads} worker threads, {} chunks", chunks.len());
     Ok(WorldStats {
-        chunks: (2 * radius_chunks as usize + 1).pow(2),
+        chunks: chunks.len(),
         blocks: total_blocks,
-        mean_surface: if samples > 0 {
-            (total_surface / samples) as i32
-        } else {
-            MIN_Y
-        },
+        mean_surface,
         files,
     })
 }
