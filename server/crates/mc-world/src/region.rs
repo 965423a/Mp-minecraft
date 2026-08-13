@@ -1,6 +1,7 @@
-//! 简化版区域存档:将区块保存为二进制文件。
-//! 结构:魔数 "MCSR" + 版本 + 种子 + 世界类型 + 区块数据(位打包 sections)。
-//! 每区块 24 个 section,每 section:bit 数(1B)+ long 数组长度(VarLong)+ longs。
+//! 简化版区域存档:一个 region 文件保存多个区块(与 MC region 类似)。
+//! 结构:魔数 "MCSR" + 版本 + 种子 + 世界类型 + 区块数
+//!      + 每区块索引条目(cx, cz, offset, length)
+//!      + 数据区(位打包 sections,空 section 只写 bits=0 + len=0)。
 //! 后续可替换为原版 region 格式。
 
 use crate::chunk::{Chunk, Section, SECTIONS};
@@ -10,13 +11,89 @@ use std::io::{self, Read};
 use std::path::Path;
 
 const MAGIC: &[u8; 4] = b"MCSR";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const BIT_DEPTH: u32 = 6; // 0..63 的方块 ID 足够
+const ENTRY_SIZE: usize = 16;
+const HEADER_SIZE: usize = 4 + 4 + 8 + 1 + 4;
 
 /// 世界存档目录(world/)下的元数据。
 pub struct RegionFile {
     cx: i32,
     cz: i32,
+}
+
+/// 读取已有 region 文件的索引条目(cx, cz, offset, length)。
+fn read_entries(buf: &[u8]) -> io::Result<Vec<(i32, i32, usize, usize)>> {
+    if buf.len() < HEADER_SIZE || &buf[0..4] != MAGIC {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "bad region magic"));
+    }
+    let version = u32::from_be_bytes(buf[4..8].try_into().unwrap());
+    if version != VERSION {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "region version"));
+    }
+    let count = u32::from_be_bytes(buf[17..21].try_into().unwrap()) as usize;
+    let mut entries = Vec::with_capacity(count);
+    let mut pos = HEADER_SIZE;
+    for _ in 0..count {
+        if pos + ENTRY_SIZE > buf.len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "region entries truncated"));
+        }
+        let cx = i32::from_be_bytes(buf[pos..pos + 4].try_into().unwrap());
+        let cz = i32::from_be_bytes(buf[pos + 4..pos + 8].try_into().unwrap());
+        let off = u32::from_be_bytes(buf[pos + 8..pos + 12].try_into().unwrap()) as usize;
+        let len = u32::from_be_bytes(buf[pos + 12..pos + 16].try_into().unwrap()) as usize;
+        entries.push((cx, cz, off, len));
+        pos += ENTRY_SIZE;
+    }
+    Ok(entries)
+}
+
+/// 将一个区块序列化为数据区内容。
+fn chunk_bytes(chunk: &Chunk) -> Vec<u8> {
+    let mut out = Vec::with_capacity(24 * 3077);
+    for s in chunk.sections().iter() {
+        if s.is_empty() {
+            out.push(0);
+            out.extend_from_slice(&0u32.to_be_bytes());
+            continue;
+        }
+        out.push(BIT_DEPTH as u8);
+        let packed = s.pack(BIT_DEPTH);
+        out.extend_from_slice(&(packed.len() as u32).to_be_bytes());
+        for l in &packed {
+            out.extend_from_slice(&l.to_be_bytes());
+        }
+    }
+    out
+}
+
+/// 从数据区反序列化区块。
+fn parse_chunk(buf: &[u8], cx: i32, cz: i32) -> io::Result<Chunk> {
+    let mut chunk = Chunk::new(cx, cz);
+    let mut sections = [Section::new(); SECTIONS];
+    let mut pos = 0usize;
+    for s in sections.iter_mut() {
+        if pos + 5 > buf.len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "chunk data truncated"));
+        }
+        let bits = buf[pos] as u32;
+        let len = u32::from_be_bytes(buf[pos + 1..pos + 5].try_into().unwrap()) as usize;
+        pos += 5;
+        if bits == 0 {
+            continue;
+        }
+        if pos + len * 8 > buf.len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "chunk longs truncated"));
+        }
+        let mut packed = Vec::with_capacity(len);
+        for _ in 0..len {
+            packed.push(u64::from_be_bytes(buf[pos..pos + 8].try_into().unwrap()));
+            pos += 8;
+        }
+        s.unpack(bits, &packed);
+    }
+    chunk.replace_sections(sections);
+    Ok(chunk)
 }
 
 impl RegionFile {
@@ -36,22 +113,48 @@ impl RegionFile {
         let region_dir = world_dir.join("region");
         fs::create_dir_all(&region_dir)?;
         let path = Self::path_for(world_dir, chunk.cx, chunk.cz);
-        let mut out = Vec::with_capacity(24 * 4096);
+
+        let mut entries: Vec<(i32, i32, usize, usize)> = Vec::new();
+        let mut data_map: Vec<(i32, i32, Vec<u8>)> = Vec::new();
+        if let Ok(buf) = fs::read(&path) {
+            if let Ok(es) = read_entries(&buf) {
+                for (ex, ez, off, len) in es {
+                    let end = off + len;
+                    if end <= buf.len() && len > 0 {
+                        data_map.push((ex, ez, buf[off..end].to_vec()));
+                        entries.push((ex, ez, 0, 0));
+                    }
+                }
+            }
+        }
+        entries.retain(|(ex, ez, _, _)| *ex != chunk.cx || *ez != chunk.cz);
+        data_map.retain(|(ex, ez, _)| *ex != chunk.cx || *ez != chunk.cz);
+
+        let new_data = chunk_bytes(chunk);
+        entries.push((chunk.cx, chunk.cz, 0, 0));
+        data_map.push((chunk.cx, chunk.cz, new_data));
+
+        let mut out = Vec::with_capacity(HEADER_SIZE + entries.len() * ENTRY_SIZE);
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&VERSION.to_be_bytes());
         out.extend_from_slice(&seed.to_be_bytes());
         out.extend_from_slice(&[world_type as u8]);
-        out.extend_from_slice(&chunk.cx.to_be_bytes());
-        out.extend_from_slice(&chunk.cz.to_be_bytes());
+        out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
 
-        for s in chunk.sections().iter() {
-            out.push(BIT_DEPTH as u8);
-            let packed = s.pack(BIT_DEPTH);
-            out.extend_from_slice(&(packed.len() as u32).to_be_bytes());
-            for l in &packed {
-                out.extend_from_slice(&l.to_be_bytes());
-            }
+        let mut payload = Vec::new();
+        let payload_base = HEADER_SIZE + entries.len() * ENTRY_SIZE;
+        for (entry, (_, _, data)) in entries.iter_mut().zip(data_map.iter()) {
+            entry.2 = payload_base + payload.len();
+            entry.3 = data.len();
+            payload.extend_from_slice(data);
         }
+        for (ex, ez, off, len) in &entries {
+            out.extend_from_slice(&ex.to_be_bytes());
+            out.extend_from_slice(&ez.to_be_bytes());
+            out.extend_from_slice(&(*off as u32).to_be_bytes());
+            out.extend_from_slice(&(*len as u32).to_be_bytes());
+        }
+        out.extend_from_slice(&payload);
         fs::write(&path, out)
     }
 
@@ -60,39 +163,16 @@ impl RegionFile {
         let mut f = File::open(path)?;
         let mut buf = Vec::new();
         f.read_to_end(&mut buf)?;
-        if buf.len() < 22 || &buf[0..4] != MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad region magic"));
+        let entries = read_entries(&buf)?;
+        let (_, _, off, len) = entries
+            .iter()
+            .find(|(ex, ez, _, _)| *ex == cx && *ez == cz)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "chunk not in region"))?;
+        let end = off + len;
+        if end > buf.len() || *len == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "chunk offset out of range"));
         }
-        let mut pos = 4;
-        let version = u32::from_be_bytes(buf[pos..pos + 4].try_into().unwrap());
-        pos += 4;
-        let _seed = u64::from_be_bytes(buf[pos..pos + 8].try_into().unwrap());
-        pos += 8;
-        let _wt = buf[pos];
-        pos += 1;
-        let scx = i32::from_be_bytes(buf[pos..pos + 4].try_into().unwrap());
-        pos += 4;
-        let scz = i32::from_be_bytes(buf[pos..pos + 4].try_into().unwrap());
-        pos += 4;
-        if version != VERSION || scx != cx || scz != cz {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "region mismatch"));
-        }
-        let mut chunk = Chunk::new(cx, cz);
-        let mut sections = [Section::new(); SECTIONS];
-        for s in sections.iter_mut() {
-            let bits = buf[pos] as u32;
-            pos += 1;
-            let len = u32::from_be_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
-            pos += 4;
-            let mut packed = Vec::with_capacity(len);
-            for _ in 0..len {
-                packed.push(u64::from_be_bytes(buf[pos..pos + 8].try_into().unwrap()));
-                pos += 8;
-            }
-            s.unpack(bits, &packed);
-        }
-        chunk.replace_sections(sections);
-        Ok(chunk)
+        parse_chunk(&buf[*off..end], cx, cz)
     }
 
     /// 统计 world 目录已有区块文件数。
@@ -157,5 +237,40 @@ mod tests {
         let s = Section::new();
         assert!(s.get(0, 0, 0) == 0);
         assert_eq!(SECTION_VOLUME, 4096);
+    }
+
+    #[test]
+    fn one_file_many_chunks() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+        let dir = std::env::temp_dir().join("mcs-region-test3");
+        let _ = fs::remove_dir_all(&dir);
+        let g = WorldGenerator::new(42, Normal);
+        let coords = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 2)];
+        let generated: Vec<_> = coords.iter().map(|&(cx, cz)| g.generate(cx, cz)).collect();
+        for c in &generated {
+            RegionFile::save(&dir, c, 42, Normal).unwrap();
+        }
+        let files = RegionFile::count_files(&dir).unwrap();
+        assert_eq!(files, 1, "同区域应只有一个文件");
+        for ((cx, cz), orig) in coords.iter().zip(generated.iter()) {
+            let c = RegionFile::load(&dir, *cx, *cz).unwrap();
+            for x in 0..16 {
+                for z in 0..16 {
+                    for y in (MIN_Y..MAX_Y).step_by(2) {
+                        assert_eq!(c.get(x, y, z), orig.get(x, y, z), "({cx},{y},{z})");
+                    }
+                }
+            }
+        }
+        RegionFile::save(&dir, &g.generate(1, 1), 42, Normal).unwrap();
+        let c = RegionFile::load(&dir, 1, 1).unwrap();
+        assert_eq!(c.get(8, 100, 8), g.generate(1, 1).get(8, 100, 8));
+        let _ = fs::remove_dir_all(&dir);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
