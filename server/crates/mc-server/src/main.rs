@@ -10,13 +10,19 @@
 
 mod config;
 mod logger;
+mod network;
+mod protocol;
 mod world;
 
 use config::ServerConfig;
 use logger::Logger;
 use std::env;
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+/// Status JSON 里的版本名(与协议常量一致)。
+pub const VERSION_NAME: &str = mc_protocol::consts::VERSION_NAME;
 
 fn main() -> ExitCode {
     let log = Logger::new();
@@ -52,7 +58,12 @@ fn main() -> ExitCode {
     log.info(&format!("root dir: {}", root.display()));
 
     // ---- 配置 ----
-    let cfg = ServerConfig::load_or_create(&config_dir);
+    let mut cfg = ServerConfig::load_or_create(&config_dir);
+    if let Ok(p) = env::var("MCS_PORT") {
+        if let Ok(port) = p.parse::<u16>() {
+            cfg.port = port;
+        }
+    }
     log.info(&format!(
         "config: seed={} type={} port={} motd=\"{}\"",
         cfg.seed, cfg.world_type, cfg.port, cfg.motd
@@ -74,13 +85,30 @@ fn main() -> ExitCode {
         }
     }
 
-    // ---- 网络监听(后续实现 v775 协议) ----
+    // ---- 网络监听:真实 TCP,处理 Handshake/Status/Login ----
+    let port = cfg.port;
+    let motd = cfg.motd.clone();
+    let max_players = cfg.max_players;
     log.info(&format!(
         "server listening on 0.0.0.0:{} (protocol 775, MC 26.1.2)",
-        cfg.port
+        port
     ));
-    log.info("Done. This is a Mp-minecraft server.");
-    log.info("Type 'stop' to shut down (console input not yet wired).");
+    match network::NetworkServer::bind(port, move |stream: TcpStream| {
+        let _ = protocol::handle_connection(stream, port, &motd, max_players);
+    }) {
+        Ok(net) => {
+            log.info("Done. This is a Mp-minecraft server.");
+            log.info("Type 'stop' to shut down (console input not yet wired).");
+            if let Err(e) = net.run() {
+                log.error(&format!("network error: {e}"));
+                return ExitCode::FAILURE;
+            }
+        }
+        Err(e) => {
+            log.error(&format!("cannot bind port {port}: {e}"));
+            return ExitCode::FAILURE;
+        }
+    }
 
     ExitCode::SUCCESS
 }
