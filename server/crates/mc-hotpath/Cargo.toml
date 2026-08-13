@@ -9,3 +9,6 @@ name = "mc_hotpath"
 path = "src/lib.rs"
 
 [dependencies]
+
+[build-dependencies]
+cc = { version = "1", features = ["parallel"] }

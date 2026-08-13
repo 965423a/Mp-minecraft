@@ -9,13 +9,11 @@ header_start:
     .long MB2_ARCH_I386
     .long header_end - header_start
     .long 0x100000000 - (MB2_MAGIC + MB2_ARCH_I386 + (header_end - header_start))
-    /* 信息请求:内存映射(MMAP) */
-    .short 1, 0, 16
-    .long 6
-    .align 8
-    /* 结束 tag */
-    .short 0, 0, 8
+    /* 结束 tag:type=0, flags=0, size=8 */
+    .short 0, 0
+    .long 8
 header_end:
+    .align 8
 
 .section .bss
 .align 4096
@@ -78,9 +76,9 @@ _start:
     cmpl $512, %ecx
     jb 1b
 
-    /* 3. 启用 PAE */
+    /* 3. 启用 PAE + SSE (OSFXSR | OSXMMEXCPT) */
     movl %cr4, %eax
-    orl $0x20, %eax
+    orl $0x620, %eax
     movl %eax, %cr4
 
     /* 4. EFER.LME */
