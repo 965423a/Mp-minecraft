@@ -1,0 +1,20 @@
+# Rust / Cargo
+target/
+Cargo.lock
+**/Cargo.lock
+
+# 构建产物
+dist/
+*.o
+*.a
+*.bin
+*.elf
+
+# ISO / 系统
+sysroot/build/
+kernel/build/
+*.iso
+
+# 日志与临时文件
+*.log
+tmp/

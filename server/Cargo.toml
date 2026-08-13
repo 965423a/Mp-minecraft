@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mc-protocol",
+    "crates/mc-world",
+    "crates/mc-hotpath",
+    "crates/mc-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+mc-protocol = { path = "crates/mc-protocol" }
+mc-world = { path = "crates/mc-world" }
+mc-hotpath = { path = "crates/mc-hotpath" }
