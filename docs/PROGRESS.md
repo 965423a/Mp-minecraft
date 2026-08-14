@@ -37,6 +37,16 @@
   软浮点符号为 0)。
 - 系统命令行:默认进入,行编辑(退格/Shift/大写),命令
   help/mem/ver/eula/install/reboot/ctrls,QEMU 验证。
+- rootfs:内存只读文件系统(Linux FHS 目录树,57 节点),目录
+  /bin /boot /dev /etc /home /lib /media /mnt /opt /proc /root /run
+  /sbin /srv /sys /tmp /usr /var,含 /etc/os-release、/proc/meminfo
+  等演示文件;命令 pwd / cd(相对/绝对路径,支持 / . ..)/
+  ls(权限位+大小)/ cat,QEMU 验证。
+- systemctl:start/stop/restart/status/list-units,省略
+  ".service" 后缀自动匹配;mc-server.service 运行状态与服务器
+  控制台共享,QEMU 验证。
+- 服务器控制台:`ctrls` 进入,help/start/stop/restart/list/say(支持中文
+  广播)/version/fg(fg 返回系统命令行),QEMU 验证。
 - 汉字显示:VGA 文本模式字库重载(plane 2 上传 0x80-0xFF 槽位,
   汉字 16x16 = 左右两个 8x16 槽位),GB2312 16x16 点阵
   (HZK16 262KB)+ 逻辑屏幕缓冲 + 滚动,一屏最多 64 汉字。
@@ -44,8 +54,8 @@
   782 常用字),候选黑底窗框(光标下方,1-9 选字,空格/Esc 操作),
   上屏 GB2312 双字节;内核数据包:boot/data/hzk16.bin +
   pinyin_pack.bin(scripts/gen_pinyin.py 生成)。
-- 服务器控制台:`ctrls` 进入,help/start/stop/list/say(支持中文
-  广播)/version/exit,exit 返回系统命令行,QEMU 验证。
+- 服务器控制台:`ctrls` 进入,help/start/stop/restart/list/say(支持中文
+  广播)/version/fg(fg 返回系统命令行),QEMU 验证。
 
 ## 决策记录(已定案)
 

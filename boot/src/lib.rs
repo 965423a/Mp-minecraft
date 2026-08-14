@@ -7,6 +7,8 @@
 #![no_std]
 #![no_main]
 
+mod fs;
+
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 
@@ -857,6 +859,18 @@ fn split_ascii_word(line: &[u8]) -> (&[u8], &[u8]) {
     (&line[start..i], &line[i..])
 }
 
+/// 跳过剩余部分开头的空格,返回参数区。
+fn trim_space(mut rest: &[u8]) -> &[u8] {
+    while rest.first() == Some(&b' ') {
+        rest = &rest[1..];
+    }
+    rest
+}
+
+/// 当前目录节点 id 与服务器运行状态(shell 与 systemctl/控制台共享)。
+static mut CWD: usize = 0;
+static mut SERVER_RUNNING: bool = false;
+
 fn system_shell(vga: &mut Vga, mem: u64, eula: bool) -> ! {
     let _ = writeln!(vga, "");
     let _ = writeln!(vga, "  Mp-minecraft system shell. Type 'help'. Ctrl+Space: CN/EN IME");
@@ -870,13 +884,18 @@ fn system_shell(vga: &mut Vga, mem: u64, eula: bool) -> ! {
         match cmd {
             b"help" => {
                 let _ = writeln!(vga, "  commands:");
-                let _ = writeln!(vga, "    help      this list");
-                let _ = writeln!(vga, "    mem       usable memory");
-                let _ = writeln!(vga, "    ver       version info");
-                let _ = writeln!(vga, "    eula      EULA status");
-                let _ = writeln!(vga, "    install   install system (demo)");
-                let _ = writeln!(vga, "    ctrls     Minecraft server console");
-                let _ = writeln!(vga, "    reboot    restart");
+                let _ = writeln!(vga, "    help        this list");
+                let _ = writeln!(vga, "    pwd         print working directory");
+                let _ = writeln!(vga, "    cd [path]   change directory");
+                let _ = writeln!(vga, "    ls [path]   list directory");
+                let _ = writeln!(vga, "    cat <file>  show file contents");
+                let _ = writeln!(vga, "    systemctl   service control (start/stop/status)");
+                let _ = writeln!(vga, "    mem         usable memory");
+                let _ = writeln!(vga, "    ver         version info");
+                let _ = writeln!(vga, "    eula        EULA status");
+                let _ = writeln!(vga, "    install     install system (demo)");
+                let _ = writeln!(vga, "    ctrls       Minecraft server console");
+                let _ = writeln!(vga, "    reboot      restart");
             }
             b"mem" => {
                 let _ = writeln!(vga, "  usable memory: {:.1} MiB", mem as f64 / 1048576.0);
@@ -890,6 +909,86 @@ fn system_shell(vga: &mut Vga, mem: u64, eula: bool) -> ! {
                     "  EULA: {}",
                     if eula { "accepted" } else { "rejected" }
                 );
+            }
+            b"pwd" => {
+                let mut p = [0u8; 96];
+                let len = fs::full_path(unsafe { CWD }, &mut p);
+                let _ = vga.write_str("  ");
+                print_bytes(vga, &p[..len]);
+                let _ = writeln!(vga, "");
+            }
+            b"cd" => {
+                let arg = trim_space(rest);
+                let target = if arg.is_empty() {
+                    0
+                } else {
+                    match fs::resolve(unsafe { CWD }, arg) {
+                        Some(id) if fs::is_dir(id) => id,
+                        _ => {
+                            let _ = writeln!(vga, "  cd: no such directory");
+                            continue;
+                        }
+                    }
+                };
+                unsafe {
+                    CWD = target;
+                }
+            }
+            b"ls" => {
+                let arg = trim_space(rest);
+                let dir = if arg.is_empty() {
+                    unsafe { CWD }
+                } else {
+                    match fs::resolve(unsafe { CWD }, arg) {
+                        Some(id) => id,
+                        None => {
+                            let _ = writeln!(vga, "  ls: no such file or directory");
+                            continue;
+                        }
+                    }
+                };
+                if !fs::is_dir(dir) {
+                    let _ = writeln!(vga, "  ls: not a directory");
+                    continue;
+                }
+                let mut c = fs::first_child(dir);
+                while let Some(id) = c {
+                    if fs::is_dir(id) {
+                        let _ = writeln!(
+                            vga,
+                            "  drwxr-xr-x  {:5}  {}/",
+                            fs::size(id),
+                            core::str::from_utf8(fs::name(id)).unwrap_or("?")
+                        );
+                    } else {
+                        let _ = writeln!(
+                            vga,
+                            "  -rw-r--r--  {:5}  {}",
+                            fs::size(id),
+                            core::str::from_utf8(fs::name(id)).unwrap_or("?")
+                        );
+                    }
+                    c = fs::next(id);
+                }
+            }
+            b"cat" => {
+                let arg = trim_space(rest);
+                if arg.is_empty() {
+                    let _ = writeln!(vga, "  cat: missing operand");
+                    continue;
+                }
+                match fs::resolve(unsafe { CWD }, arg) {
+                    Some(id) if !fs::is_dir(id) => {
+                        print_bytes(vga, fs::content(id));
+                        let _ = writeln!(vga, "");
+                    }
+                    _ => {
+                        let _ = writeln!(vga, "  cat: no such file");
+                    }
+                }
+            }
+            b"systemctl" => {
+                systemctl(vga, trim_space(rest));
             }
             b"install" => {
                 install_progress(vga);
@@ -914,11 +1013,146 @@ fn system_shell(vga: &mut Vga, mem: u64, eula: bool) -> ! {
     }
 }
 
+/// 服务单元表。
+const UNITS: &[(&[u8], &[u8])] = &[
+    (b"mc-server.service", b"Mp-minecraft server (0.0.0.0:25565)"),
+    (b"console.service", b"server console interface (ctrls)"),
+];
+
+/// systemd 风格:省略 ".service" 后缀时也匹配。
+fn unit_matches(unit: &[u8], name: &[u8]) -> bool {
+    if unit == name {
+        return true;
+    }
+    name.ends_with(b".service") && unit == &name[..name.len() - 8]
+}
+
+fn unit_status(vga: &mut Vga, unit: &[u8], running: bool) {
+    for (name, desc) in UNITS {
+        if unit_matches(unit, name) {
+            let _ = writeln!(
+                vga,
+                "  {} - {}",
+                core::str::from_utf8(unit).unwrap_or("?"),
+                if running { "active (running)" } else { "inactive (dead)" }
+            );
+            let _ = write!(vga, "       Loaded: yes  Desc: ");
+            let _ = vga.write_str(core::str::from_utf8(desc).unwrap_or("?"));
+            let _ = writeln!(vga, "");
+            return;
+        }
+    }
+    let _ = writeln!(
+        vga,
+        "  unit '{}' not found",
+        core::str::from_utf8(unit).unwrap_or("?")
+    );
+}
+
+/// systemctl 子命令:status / list-units / start / stop / restart <unit>。
+fn systemctl(vga: &mut Vga, args: &[u8]) {
+    let (sub, unit) = split_ascii_word(args);
+    match sub {
+        b"status" => {
+            let running = unsafe { SERVER_RUNNING };
+            let unit = trim_space(unit);
+            if unit.is_empty() {
+                let _ = writeln!(vga, "  systemctl status: showing all units");
+                for (name, _) in UNITS {
+                    let r = running && *name == b"mc-server.service";
+                    let _ = writeln!(
+                        vga,
+                        "    {}  {}",
+                        core::str::from_utf8(name).unwrap_or("?"),
+                        if r { "active (running)" } else { "inactive (dead)" }
+                    );
+                }
+            } else {
+                unit_status(vga, unit, running);
+            }
+        }
+        b"list-units" => {
+            let _ = writeln!(vga, "  UNIT                LOAD  ACTIVE  SUB");
+            for (name, _) in UNITS {
+                let _ = writeln!(
+                    vga,
+                    "  {}  loaded active",
+                    core::str::from_utf8(name).unwrap_or("?")
+                );
+            }
+        }
+        b"start" => {
+            let unit = trim_space(unit);
+            if unit.is_empty() {
+                let _ = writeln!(vga, "  systemctl: start requires a unit");
+                return;
+            }
+            if unit_matches(unit, b"mc-server.service") {
+                if unsafe { SERVER_RUNNING } {
+                    let _ = writeln!(vga, "  mc-server.service already running");
+                } else {
+                    unsafe {
+                        SERVER_RUNNING = true;
+                    }
+                    let _ = writeln!(vga, "  starting mc-server.service ...");
+                    let _ = writeln!(vga, "  [server] loading world generator (normal terrain)");
+                    let _ = writeln!(vga, "  [server] listening on 0.0.0.0:25565");
+                    let _ = writeln!(vga, "  [server] Done. Welcome to Mp-minecraft!");
+                }
+            } else if unit_matches(unit, b"console.service") {
+                let _ = writeln!(vga, "  console.service: use 'ctrls' to attach");
+            } else {
+                unit_status(vga, unit, false);
+            }
+        }
+        b"stop" => {
+            let unit = trim_space(unit);
+            if unit_matches(unit, b"mc-server.service") {
+                if unsafe { SERVER_RUNNING } {
+                    unsafe {
+                        SERVER_RUNNING = false;
+                    }
+                    let _ = writeln!(vga, "  stopping mc-server.service ...");
+                    let _ = writeln!(vga, "  [server] stopped");
+                } else {
+                    let _ = writeln!(vga, "  mc-server.service is not running");
+                }
+            } else if unit.is_empty() {
+                let _ = writeln!(vga, "  systemctl: stop requires a unit");
+            } else {
+                unit_status(vga, unit, false);
+            }
+        }
+        b"restart" => {
+            let unit = trim_space(unit);
+            if unit_matches(unit, b"mc-server.service") {
+                unsafe {
+                    SERVER_RUNNING = false;
+                }
+                let _ = writeln!(vga, "  restarting mc-server.service ...");
+                unsafe {
+                    SERVER_RUNNING = true;
+                }
+                let _ = writeln!(vga, "  [server] Done. Welcome to Mp-minecraft!");
+            } else if unit.is_empty() {
+                let _ = writeln!(vga, "  systemctl: restart requires a unit");
+            } else {
+                unit_status(vga, unit, false);
+            }
+        }
+        b"" => {
+            let _ = writeln!(vga, "  systemctl [status|list-units|start|stop|restart] [unit]");
+        }
+        _ => {
+            let _ = writeln!(vga, "  systemctl: unknown subcommand");
+        }
+    }
+}
+
 fn server_console(vga: &mut Vga) {
     let _ = writeln!(vga, "");
     let _ = writeln!(vga, "  === Mp-minecraft server console ===");
-    let _ = writeln!(vga, "    help | start | stop | list | say <text> | version | exit");
-    let mut running = false;
+    let _ = writeln!(vga, "    help | start | stop | restart | list | say <text> | version | fg");
     loop {
         let mut buf = [0u8; 128];
         let n = read_line(vga, "mcs-server> ", &mut buf);
@@ -928,24 +1162,45 @@ fn server_console(vga: &mut Vga) {
                 let _ = writeln!(vga, "    help               this list");
                 let _ = writeln!(vga, "    start              start the server");
                 let _ = writeln!(vga, "    stop               stop the server");
+                let _ = writeln!(vga, "    restart            restart the server");
                 let _ = writeln!(vga, "    list               players online");
                 let _ = writeln!(vga, "    say <text>         broadcast message");
                 let _ = writeln!(vga, "    version            server version");
-                let _ = writeln!(vga, "    exit               back to system shell");
+                let _ = writeln!(vga, "    fg                 back to system shell");
+                let _ = writeln!(vga, "    (systemctl start/stop/restart mc-server works too)");
             }
             b"start" => {
-                if running {
+                if unsafe { SERVER_RUNNING } {
                     let _ = writeln!(vga, "  server already running");
                 } else {
-                    running = true;
+                    unsafe {
+                        SERVER_RUNNING = true;
+                    }
                     let _ = writeln!(vga, "  [server] loading world generator (normal terrain)");
                     let _ = writeln!(vga, "  [server] listening on 0.0.0.0:25565");
                     let _ = writeln!(vga, "  [server] Done. Welcome to Mp-minecraft!");
                 }
             }
             b"stop" => {
-                running = false;
-                let _ = writeln!(vga, "  [server] stopped");
+                if unsafe { SERVER_RUNNING } {
+                    unsafe {
+                        SERVER_RUNNING = false;
+                    }
+                    let _ = writeln!(vga, "  [server] stopped");
+                } else {
+                    let _ = writeln!(vga, "  server is not running");
+                }
+            }
+            b"restart" => {
+                unsafe {
+                    SERVER_RUNNING = false;
+                }
+                let _ = writeln!(vga, "  [server] stopping ...");
+                unsafe {
+                    SERVER_RUNNING = true;
+                }
+                let _ = writeln!(vga, "  [server] reloading world ...");
+                let _ = writeln!(vga, "  [server] Done. Welcome to Mp-minecraft!");
             }
             b"list" => {
                 let _ = writeln!(vga, "  [server] 0 players online");
@@ -962,7 +1217,7 @@ fn server_console(vga: &mut Vga) {
             b"version" => {
                 let _ = writeln!(vga, "  Mp-minecraft Server 0.1 (protocol 775, MC 26.1.2)");
             }
-            b"exit" => {
+            b"fg" => {
                 let _ = writeln!(vga, "  back to system shell");
                 return;
             }
@@ -1033,6 +1288,11 @@ fn eula_prompt(vga: &mut Vga) -> bool {
 pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     com1_init();
     font_init();
+    fs::init();
+    unsafe {
+        CWD = 0;
+        SERVER_RUNNING = false;
+    }
     let mut vga = Vga::new();
     vga.clear();
     let mut com = Com1;
@@ -1042,6 +1302,7 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     let mem = total_memory(mb2_info);
     log!("memory map: {mem} bytes total usable");
     log!("VGA text mode + HZK16 font ready, COM1 ready");
+    log!("rootfs: {} nodes mounted", fs::node_count());
 
     // EULA 第一步
     let accepted = eula_prompt(&mut vga);
