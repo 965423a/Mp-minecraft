@@ -7,7 +7,9 @@
 #![no_std]
 #![no_main]
 
+mod acpi;
 mod fs;
+mod numa;
 
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
@@ -216,6 +218,20 @@ impl Vga {
     }
 
     fn put(&mut self, ch: u16) {
+        if self.row > ROWS + 5 {
+            let mut com = Com1;
+            let _ = writeln!(
+                com,
+                "[dbg] put: self={:p} row={} col={} ch={:#x}",
+                self as *const Vga,
+                self.row,
+                self.col,
+                ch
+            );
+            loop {
+                core::hint::spin_loop();
+            }
+        }
         if ch == '\n' as u16 {
             self.row += 1;
             self.col = 0;
@@ -337,8 +353,7 @@ fn com1_init() {
     }
 }
 
-struct Com1;
-
+pub struct Com1;
 impl Write for Com1 {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for b in s.bytes() {
@@ -368,12 +383,13 @@ impl Write for Com1 {
     }
 }
 
+#[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {{
         use core::fmt::Write;
-        let _ = write!(Com1, "[kernel] ");
-        let _ = write!(Com1, $($arg)*);
-        let _ = writeln!(Com1);
+        let _ = write!(crate::Com1, "[kernel] ");
+        let _ = write!(crate::Com1, $($arg)*);
+        let _ = writeln!(crate::Com1);
     }};
 }
 
@@ -871,7 +887,7 @@ fn trim_space(mut rest: &[u8]) -> &[u8] {
 static mut CWD: usize = 0;
 static mut SERVER_RUNNING: bool = false;
 
-fn system_shell(vga: &mut Vga, mem: u64, eula: bool) -> ! {
+fn system_shell(vga: &mut Vga, eula: bool) -> ! {
     let _ = writeln!(vga, "");
     let _ = writeln!(vga, "  Mp-minecraft system shell. Type 'help'. Ctrl+Space: CN/EN IME");
     loop {
@@ -890,7 +906,8 @@ fn system_shell(vga: &mut Vga, mem: u64, eula: bool) -> ! {
                 let _ = writeln!(vga, "    ls [path]   list directory");
                 let _ = writeln!(vga, "    cat <file>  show file contents");
                 let _ = writeln!(vga, "    systemctl   service control (start/stop/status)");
-                let _ = writeln!(vga, "    mem         usable memory");
+                let _ = writeln!(vga, "    mem         usable memory per NUMA node");
+                let _ = writeln!(vga, "    numa        NUMA topology + local alloc test");
                 let _ = writeln!(vga, "    ver         version info");
                 let _ = writeln!(vga, "    eula        EULA status");
                 let _ = writeln!(vga, "    install     install system (demo)");
@@ -898,7 +915,47 @@ fn system_shell(vga: &mut Vga, mem: u64, eula: bool) -> ! {
                 let _ = writeln!(vga, "    reboot      restart");
             }
             b"mem" => {
-                let _ = writeln!(vga, "  usable memory: {:.1} MiB", mem as f64 / 1048576.0);
+                for n in 0..numa::node_count() {
+                    let (mb, free) = numa::node_mem(n);
+                    let _ = writeln!(
+                        vga,
+                        "  node {}: {} MiB usable ({} frames free)",
+                        n,
+                        mb,
+                        free
+                    );
+                }
+            }
+            b"numa" => {
+                let _ = writeln!(vga, "  NUMA topology: {} nodes", numa::node_count());
+                for n in 0..numa::node_count() {
+                    let (mb, free) = numa::node_mem(n);
+                    let _ = writeln!(vga, "    node {}: {} MiB, {} free frames", n, mb, free);
+                }
+                let _ = writeln!(vga, "  local alloc test (1 frame per node):");
+                let mut frames = [0u64; 8];
+                let mut got = 0;
+                for n in 0..numa::node_count() {
+                    if let Some(p) = numa::alloc_local(n) {
+                        frames[got] = p;
+                        got += 1;
+                        let owner = numa::node_of(p);
+                        let _ = writeln!(
+                            vga,
+                            "    node {} -> phys 0x{:x} (owner node {})",
+                            n,
+                            p,
+                            owner
+                        );
+                    } else {
+                        let _ = writeln!(vga, "    node {} -> alloc failed", n);
+                    }
+                }
+                let _ = writeln!(vga, "  freeing {} frames...", got);
+                for i in 0..got {
+                    numa::free(frames[i]);
+                }
+                let _ = writeln!(vga, "  done");
             }
             b"ver" => {
                 let _ = writeln!(vga, "  Mp-minecraft System v0.1  (protocol 775, MC 26.1.2)");
@@ -1282,13 +1339,66 @@ fn eula_prompt(vga: &mut Vga) -> bool {
     }
 }
 
+// ---------------- 分页(64 位全量恒等映射) ----------------
+
+/// 完整页表:pml4(4096) + 16 x pdpt(每 1GiB) + 16 x pd,共 16GiB。
+/// 全部地址运算走 u64,不存在 32 位截断。
+const PAGING_GIB: usize = 16;
+const PD_ENTRIES: usize = 512;
+
+#[repr(align(4096))]
+struct Aligned4096([u8; 4096 + 16 * 4096 + 16 * 4096]);
+
+static mut PAGE_TABLES: Aligned4096 = Aligned4096([0u8; 4096 + 16 * 4096 + 16 * 4096]);
+
+/// 建立 16GiB 恒等 2MiB 大页映射并切换 CR3。
+/// 虚拟 [0,16G) 全部走 PML4[0] -> 单张 PDPT;PDPT[i] -> PD[i],
+/// PD[i][j] -> 物理 i*1G + j*2M。
+/// 必须在 kernel_main 最先调用(过渡表仍在,代码/栈/数据全在低 1GiB)。
+fn setup_paging() {
+    unsafe {
+        let base = core::ptr::addr_of!(PAGE_TABLES.0) as *const u8 as u64;
+        let pml4 = base;
+        let pdpts = base + 4096;
+        let pds = base + 4096 + (PAGING_GIB as u64) * 4096;
+        let pml4_p = pml4 as *mut u64;
+        let pdpt_p = pdpts as *mut u64;
+        pml4_p.write_volatile(pdpts | 0x3);
+        for i in 0..PAGING_GIB as u64 {
+            let pd_p = (pds + i * 4096) as *mut u64;
+            pdpt_p
+                .add(i as usize)
+                .write_volatile(pds + i * 4096 | 0x3);
+            for j in 0..PD_ENTRIES as u64 {
+                pd_p.add(j as usize).write_volatile(
+                    (i << 30) | (j << 21) | 0x83,
+                );
+            }
+        }
+        core::arch::asm!("mov cr3, rax", in("rax") pml4, options(nostack, nomem));
+        let probes: [u64; 4] = [
+            0x200000u64,    // 2M
+            0x40000000u64,  // 1G
+            0xBFE00000u64,  // ~3G
+            0x100000000u64, // 4G
+        ];
+        for (i, a) in probes.iter().enumerate() {
+            let v = (*a as *const u8).read_volatile();
+            log!("paging: probe[{}] {:#x} = {:#x}", i, a, v);
+        }
+        log!("paging: cr3 = {:#x}, 16GiB mapped", pml4);
+    }
+}
+
 // ---------------- 入口 ----------------
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
+    setup_paging();
     com1_init();
     font_init();
     fs::init();
+    numa::init(mb2_info);
     unsafe {
         CWD = 0;
         SERVER_RUNNING = false;
@@ -1301,8 +1411,17 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     log!("entry: multiboot2 info = {:p}", mb2_info);
     let mem = total_memory(mb2_info);
     log!("memory map: {mem} bytes total usable");
+    log!("mb2 info raw: ptr={:p} total={}", mb2_info, unsafe {
+        if mb2_info.is_null() {
+            0
+        } else {
+            *(mb2_info as *const u32)
+        }
+    });
+    acpi::acpi_log();
     log!("VGA text mode + HZK16 font ready, COM1 ready");
     log!("rootfs: {} nodes mounted", fs::node_count());
+    log!("numa: {} nodes", numa::node_count());
 
     // EULA 第一步
     let accepted = eula_prompt(&mut vga);
@@ -1319,7 +1438,7 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     let _ = writeln!(vga, "   EULA:     {}", if accepted { "accepted" } else { "rejected" });
     let _ = writeln!(vga, "");
 
-    system_shell(&mut vga, mem, accepted);
+    system_shell(&mut vga, accepted);
 }
 
 #[panic_handler]

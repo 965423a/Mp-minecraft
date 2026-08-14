@@ -18,6 +18,8 @@ SECTIONS {
         *(COMMON)
         *(.bss .bss.*)
     }
+    . = ALIGN(4096);
+    _end = .;
     /DISCARD/ : {
         *(.comment)
         *(.note .note.*)

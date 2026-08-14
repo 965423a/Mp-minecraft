@@ -28,8 +28,11 @@ pd:
 .global _start
 .code32
 _start:
+    /* 关中断:内核尚无 IDT,PIT 定时器中断会跳垃圾 IDT 破坏内存 */
+    cli
+
     /* 保存 multiboot2 info 指针 (ebx) 与 magic (eax) */
-    movl %ebx, %esi
+    movl %ebx, %ebp
     movl %eax, %edi
 
     /* 1. 检查 CPUID */
@@ -53,7 +56,8 @@ _start:
     testl $0x20000000, %edx   /* LM bit 29 */
     jz halt_error
 
-    /* 2. 建立恒等页表:2MiB 大页映射前 1GiB */
+    /* 2. 建立过渡恒等页表:2MiB 大页映射前 1GiB(仅用于进入 64 位;
+          完整 16GiB 映射由 Rust 侧 64 位代码 setup_paging() 建立) */
     movl $pml4, %eax
     movl %eax, %cr3
     /* PML4[0] -> PDPT */
@@ -102,7 +106,7 @@ _start:
 
 .code64
 long_start:
-    movq %rsi, %rdi      /* multiboot2 info */
+    movq %rbp, %rdi      /* multiboot2 info */
     movq %rdi, %r15      /* 保存 */
     /* 数据段选择器 */
     movw $0x10, %ax
