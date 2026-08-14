@@ -99,6 +99,7 @@ fn main() -> ExitCode {
         "registry loaded: {} entries",
         registry.entries.len()
     ));
+    let world = std::sync::Arc::new(std::sync::Mutex::new(world::World::open(&world_dir, seed, wtype)));
     match network::NetworkServer::bind(port, move |stream: TcpStream| {
         let _ = protocol::handle_connection(
             stream,
@@ -109,8 +110,7 @@ fn main() -> ExitCode {
             (0.5, 65.0, 0.5),
             seed,
             flat,
-            &world_dir,
-            wtype,
+            world.clone(),
             &registry,
         );
     }) {

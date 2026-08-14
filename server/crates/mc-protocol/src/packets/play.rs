@@ -16,6 +16,8 @@ pub mod clientbound {
     pub const ID_CHUNK_BATCH_START: i32 = 0x0C;
     pub const ID_SET_CHUNK_CACHE_CENTER: i32 = 0x5E;
     pub const ID_SET_DEFAULT_SPAWN_POSITION: i32 = 0x61;
+    pub const ID_BLOCK_CHANGE: i32 = 0x08;
+    pub const ID_ACKNOWLEDGE_PLAYER_DIGGING: i32 = 0x04;
 
     #[derive(Debug, Clone)]
     pub struct JoinGame {
@@ -143,6 +145,19 @@ pub mod clientbound {
         w.write_f32(angle);
     }
 
+    /// Block Update (0x08):位置 + 全局 state ID。
+    pub fn write_block_change(w: &mut WriteBuf, x: i32, y: i32, z: i32, state: u16) {
+        w.write_varint(ID_BLOCK_CHANGE);
+        w.write_position(x, y, z);
+        w.write_varint(state as i32);
+    }
+
+    /// Acknowledge Block Change (0x04):sequence。
+    pub fn write_acknowledge_player_digging(w: &mut WriteBuf, sequence: i32) {
+        w.write_varint(ID_ACKNOWLEDGE_PLAYER_DIGGING);
+        w.write_varint(sequence);
+    }
+
     /// Chunk Data and Update Light (0x2D)。
     pub fn write_chunk_data(
         w: &mut WriteBuf,
@@ -175,6 +190,10 @@ pub mod serverbound {
     pub const ID_SET_POSITION: i32 = 0x1E;
     pub const ID_SET_POSITION_ROTATION: i32 = 0x1F;
     pub const ID_PLAYER_LOADED: i32 = 0x2C;
+    pub const ID_PLAYER_ACTION: i32 = 0x29;
+    pub const ID_USE_ITEM_ON: i32 = 0x42;
+    pub const ID_SET_CREATIVE_MODE_SLOT: i32 = 0x38;
+    pub const ID_SET_HELD_ITEM: i32 = 0x35;
 
     /// Keep Alive (0x1C):i64 id。
     pub fn read_keep_alive(r: &mut ReadBuf) -> Result<i64> {
@@ -220,6 +239,95 @@ pub mod serverbound {
     /// Player Loaded (0x2C):无字段。
     pub fn read_player_loaded(_r: &mut ReadBuf) -> Result<()> {
         Ok(())
+    }
+
+    /// Player Action (0x29):status, position, face, sequence。
+    #[derive(Debug)]
+    pub struct PlayerAction {
+        pub status: i32,
+        pub x: i32,
+        pub y: i32,
+        pub z: i32,
+        pub face: i8,
+        pub sequence: i32,
+    }
+
+    pub fn read_player_action(r: &mut ReadBuf) -> Result<PlayerAction> {
+        let status = r.read_varint()?;
+        let (x, y, z) = r.read_position()?;
+        let face = r.read_i8()?;
+        let sequence = r.read_varint()?;
+        Ok(PlayerAction {
+            status,
+            x,
+            y,
+            z,
+            face,
+            sequence,
+        })
+    }
+
+    /// Use Item On (0x42):hand, position, direction, cursor, flags, sequence。
+    #[derive(Debug)]
+    pub struct UseItemOn {
+        pub hand: i32,
+        pub x: i32,
+        pub y: i32,
+        pub z: i32,
+        pub direction: i32,
+        pub sequence: i32,
+    }
+
+    pub fn read_use_item_on(r: &mut ReadBuf) -> Result<UseItemOn> {
+        let hand = r.read_varint()?;
+        let (x, y, z) = r.read_position()?;
+        let direction = r.read_varint()?;
+        let _ = r.read_f32()?;
+        let _ = r.read_f32()?;
+        let _ = r.read_f32()?;
+        let _ = r.read_bool()?;
+        let _ = r.read_bool()?;
+        let sequence = r.read_varint()?;
+        Ok(UseItemOn {
+            hand,
+            x,
+            y,
+            z,
+            direction,
+            sequence,
+        })
+    }
+
+    /// Set Creative Mode Slot (0x38):slot + UntrustedSlot(取 item id)。
+    #[derive(Debug)]
+    pub struct CreativeSlot {
+        pub slot: i16,
+        pub item_id: i32,
+    }
+
+    pub fn read_set_creative_slot(r: &mut ReadBuf) -> Result<CreativeSlot> {
+        let slot = r.read_i16()?;
+        let item_count = r.read_varint()?;
+        let mut item_id = 0;
+        if item_count > 0 {
+            item_id = r.read_varint()?;
+            let added = r.read_varint()?;
+            let removed = r.read_varint()?;
+            for _ in 0..added {
+                let _ = r.read_varint()?;
+                let len = r.read_varint()?;
+                let _ = r.read_bytes(len as usize)?;
+            }
+            for _ in 0..removed {
+                let _ = r.read_varint()?;
+            }
+        }
+        Ok(CreativeSlot { slot, item_id })
+    }
+
+    /// Set Held Item (0x35):slot。
+    pub fn read_set_held_item(r: &mut ReadBuf) -> Result<i16> {
+        r.read_i16()
     }
 }
 

@@ -18,6 +18,8 @@ pub struct ConnInfo {
     pub entity_id: i32,
     pub teleport_id: i32,
     pub keep_alive_id: i64,
+    pub inventory: [i32; 45],
+    pub held_slot: usize,
 }
 
 impl ConnInfo {
@@ -34,9 +36,13 @@ impl ConnInfo {
             entity_id: 0,
             teleport_id: 0,
             keep_alive_id: 0,
+            inventory: [0; 45],
+            held_slot: 0,
         }
     }
 }
+
+type WorldLock = std::sync::Arc<std::sync::Mutex<crate::world::World>>;
 
 pub fn handle_connection(
     mut stream: TcpStream,
@@ -47,8 +53,7 @@ pub fn handle_connection(
     spawn: (f64, f64, f64),
     seed: u64,
     flat: bool,
-    world_dir: &std::path::Path,
-    wtype: mc_world::generator::WorldType,
+    world: WorldLock,
     registry: &crate::registry::Registry,
 ) -> io::Result<()> {
     stream.set_nodelay(true)?;
@@ -117,15 +122,14 @@ pub fn handle_connection(
                     max_players,
                     view_distance,
                     spawn,
-                    world_dir,
-                    wtype,
+                    &world,
                     registry,
                 )? {
                     return Ok(());
                 }
             }
             State::Play => {
-                if !handle_play(&mut stream, packet_id, &mut r, &mut conn, compressed)? {
+                if !handle_play(&mut stream, packet_id, &mut r, &mut conn, compressed, &world)? {
                     return Ok(());
                 }
             }
@@ -257,8 +261,7 @@ fn handle_configuration(
     max_players: i32,
     view_distance: i32,
     spawn: (f64, f64, f64),
-    world_dir: &std::path::Path,
-    wtype: mc_world::generator::WorldType,
+    world: &WorldLock,
     registry: &crate::registry::Registry,
 ) -> io::Result<bool> {
     use mc_protocol::packets::configuration;
@@ -294,9 +297,7 @@ fn handle_configuration(
         }
         configuration::serverbound::ID_ACK_FINISH_CONFIGURATION => {
             conn.state = State::Play;
-            let ok = send_play_init(
-                stream, conn, max_players, view_distance, spawn, world_dir, wtype, *compressed,
-            );
+            let ok = send_play_init(stream, conn, max_players, view_distance, spawn, world, *compressed);
             ok.map(|_| true)
         }
         _ => Ok(false),
@@ -305,11 +306,12 @@ fn handle_configuration(
 
 #[allow(clippy::too_many_arguments)]
 fn handle_play(
-    _stream: &mut TcpStream,
+    stream: &mut TcpStream,
     packet_id: i32,
     r: &mut ReadBuf,
     conn: &mut ConnInfo,
-    _compressed: bool,
+    compressed: bool,
+    world: &WorldLock,
 ) -> io::Result<bool> {
     use mc_protocol::packets::play::serverbound as sb;
     match packet_id {
@@ -335,18 +337,102 @@ fn handle_play(
             Ok(true)
         }
         sb::ID_PLAYER_LOADED => Ok(true),
+        sb::ID_SET_HELD_ITEM => {
+            if let Ok(slot) = sb::read_set_held_item(r) {
+                if (0..9).contains(&slot) {
+                    conn.held_slot = slot as usize;
+                }
+            }
+            Ok(true)
+        }
+        sb::ID_SET_CREATIVE_MODE_SLOT => {
+            if let Ok(s) = sb::read_set_creative_slot(r) {
+                if (0..45).contains(&s.slot) {
+                    conn.inventory[s.slot as usize] = s.item_id;
+                }
+            }
+            Ok(true)
+        }
+        sb::ID_USE_ITEM_ON => {
+            let Ok(u) = sb::read_use_item_on(r) else {
+                return Ok(false);
+            };
+            if !(0..6).contains(&u.direction) {
+                return Ok(true);
+            }
+            let (dx, dy, dz) = FACE_OFFSETS[u.direction as usize];
+            let (nx, ny, nz) = (u.x + dx, u.y + dy, u.z + dz);
+            if let Some(block) = block_for_item(conn.inventory[conn.held_slot]) {
+                world.lock().unwrap().set_block(nx, ny, nz, block);
+                send_block_change(stream, nx, ny, nz, block, compressed)?;
+            }
+            send_ack(stream, u.sequence, compressed)?;
+            Ok(true)
+        }
+        sb::ID_PLAYER_ACTION => {
+            let Ok(a) = sb::read_player_action(r) else {
+                return Ok(false);
+            };
+            match a.status {
+                0 | 2 => {
+                    world.lock().unwrap().set_block(a.x, a.y, a.z, mc_world::blocks::AIR);
+                    send_block_change(stream, a.x, a.y, a.z, mc_world::blocks::AIR, compressed)?;
+                    send_ack(stream, a.sequence, compressed)?;
+                    Ok(true)
+                }
+                _ => Ok(true),
+            }
+        }
         _ => Ok(true),
     }
 }
 
+const FACE_OFFSETS: [(i32, i32, i32); 6] = [
+    (0, -1, 0),
+    (0, 1, 0),
+    (0, 0, -1),
+    (0, 0, 1),
+    (-1, 0, 0),
+    (1, 0, 0),
+];
+
+/// 手持 item id → 对应方块默认 state(非方块物品返回 None)。
+fn block_for_item(item_id: i32) -> Option<u16> {
+    if item_id <= 0 {
+        return None;
+    }
+    let name = mc_world::items::name_of(item_id as u32)?;
+    mc_world::blockstates::default_id(&name)
+}
+
+fn send_block_change(
+    stream: &mut TcpStream,
+    x: i32,
+    y: i32,
+    z: i32,
+    state: u16,
+    compressed: bool,
+) -> io::Result<()> {
+    use mc_protocol::packets::play::clientbound as cb;
+    let mut p = WriteBuf::new();
+    cb::write_block_change(&mut p, x, y, z, state);
+    send_packet_compressed(stream, &p.into_bytes(), COMPRESSION_THRESHOLD, compressed)
+}
+
+fn send_ack(stream: &mut TcpStream, sequence: i32, compressed: bool) -> io::Result<()> {
+    use mc_protocol::packets::play::clientbound as cb;
+    let mut p = WriteBuf::new();
+    cb::write_acknowledge_player_digging(&mut p, sequence);
+    send_packet_compressed(stream, &p.into_bytes(), COMPRESSION_THRESHOLD, compressed)
+}
 /// 进入 Play 后发送初始包:Join Game + Player Info + 区块 + 位置同步。
-pub fn send_play_init(    stream: &mut TcpStream,
+pub fn send_play_init(
+    stream: &mut TcpStream,
     conn: &mut ConnInfo,
     max_players: i32,
     view_distance: i32,
     spawn: (f64, f64, f64),
-    world_dir: &std::path::Path,
-    wtype: mc_world::generator::WorldType,
+    world: &WorldLock,
     compressed: bool,
 ) -> io::Result<()> {
     use mc_protocol::packets::play::clientbound as cb;
@@ -373,7 +459,7 @@ pub fn send_play_init(    stream: &mut TcpStream,
             dimension_type: 0,
             dimension_name: "minecraft:overworld".to_string(),
             hashed_seed: conn.hashed_seed,
-            gamemode: 0,
+            gamemode: 1,
             previous_gamemode: -1,
             is_debug: false,
             is_flat: conn.is_flat,
@@ -406,19 +492,18 @@ pub fn send_play_init(    stream: &mut TcpStream,
     send_packet_compressed(stream, &p.into_bytes(), COMPRESSION_THRESHOLD, compressed)?;
 
     let mut sent = 0;
+    let mut world = world.lock().unwrap();
     for cx in (spawn_chunk_x - 1)..=(spawn_chunk_x + 1) {
         for cz in (spawn_chunk_z - 1)..=(spawn_chunk_z + 1) {
-            let chunk = crate::world::load_or_generate(world_dir, conn.hashed_seed as u64, wtype, cx, cz);
-            let hms = mc_world::network::chunk_heightmaps(&chunk);
+            let (data, hms) = world.chunk_bytes(cx, cz, PLAINS_BIOME);
             let heightmaps: Vec<(&[u64], u32)> = hms.iter().map(|(ty, d)| (d.as_slice(), *ty)).collect();
-            let mut data = Vec::new();
-            mc_world::network::write_sections(&chunk, PLAINS_BIOME, &mut data);
             let mut p = WriteBuf::new();
             cb::write_chunk_data(&mut p, cx, cz, &heightmaps, &data, &[], &light);
             send_packet_compressed(stream, &p.into_bytes(), COMPRESSION_THRESHOLD, compressed)?;
             sent += 1;
         }
     }
+    drop(world);
 
     let mut p = WriteBuf::new();
     cb::write_chunk_batch_finished(&mut p, sent);

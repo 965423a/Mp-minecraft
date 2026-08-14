@@ -53,7 +53,7 @@ fn start_server() -> (u16, std::process::Child) {
         .env("MCS_THREADS", "2")
         .env("MCS_PORT", port.to_string())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::fs::File::create(home.join("server.log")).unwrap())
         .spawn()
         .unwrap();
     wait_port(port, std::time::Duration::from_secs(20));
@@ -394,7 +394,83 @@ fn play_full_flow() {
     let mut r = ReadBuf::new(&ka2);
     assert_eq!(r.read_varint().unwrap(), 0x2C);
     assert_eq!(r.read_i64().unwrap(), ka_id + 1);
+
+    // ---- 方块交互:持 dirt,点击 (0,63,0) 顶面 → 放置到 (0,64,0) ----
+    let mut held = WriteBuf::new();
+    held.write_varint(0x35);
+    held.write_i16(0);
+    write_frame_compressed(&mut stream, &held.into_bytes());
+
+    let mut slot = WriteBuf::new();
+    slot.write_varint(0x38);
+    slot.write_i16(0);
+    slot.write_varint(1); // itemCount
+    slot.write_varint(28); // itemId dirt
+    slot.write_varint(0); // added components
+    slot.write_varint(0); // removed components
+    write_frame_compressed(&mut stream, &slot.into_bytes());
+
+    let mut place = WriteBuf::new();
+    place.write_varint(0x42);
+    place.write_varint(0); // hand main
+    place.write_i64(((0 & 0x3FFFFFF) as i64) << 38 | ((0 & 0x3FFFFFF) as i64) << 12 | (63 & 0xFFF) as i64);
+    place.write_varint(1); // direction +Y
+    place.write_f32(0.5);
+    place.write_f32(0.5);
+    place.write_f32(0.5);
+    place.write_bool(false); // inside block
+    place.write_bool(false); // world border hit
+    place.write_varint(1); // sequence
+    write_frame_compressed(&mut stream, &place.into_bytes());
+
+    let placed = read_until(&mut stream, 0x08, &[0x2C]);
+    let mut r = ReadBuf::new(&placed);
+    assert_eq!(r.read_varint().unwrap(), 0x08);
+    let (x, y, z) = r.read_position().unwrap();
+    assert_eq!((x, y, z), (0, 64, 0), "block placed at target");
+    assert_eq!(r.read_varint().unwrap(), 10, "dirt state id");
+
+    let ack1 = read_until(&mut stream, 0x04, &[0x2C]);
+    let mut r = ReadBuf::new(&ack1);
+    assert_eq!(r.read_varint().unwrap(), 0x04);
+    assert_eq!(r.read_varint().unwrap(), 1, "ack sequence");
+
+    // ---- 破坏 (0,64,0) → air ----
+    let mut dig = WriteBuf::new();
+    dig.write_varint(0x29);
+    dig.write_varint(2); // finished digging
+    dig.write_i64(((0 & 0x3FFFFFF) as i64) << 38 | ((0 & 0x3FFFFFF) as i64) << 12 | (64 & 0xFFF) as i64);
+    dig.write_i8(1);
+    dig.write_varint(2); // sequence
+    write_frame_compressed(&mut stream, &dig.into_bytes());
+
+    let broken = read_until(&mut stream, 0x08, &[0x2C]);
+    let mut r = ReadBuf::new(&broken);
+    assert_eq!(r.read_varint().unwrap(), 0x08);
+    let (x, y, z) = r.read_position().unwrap();
+    assert_eq!((x, y, z), (0, 64, 0));
+    assert_eq!(r.read_varint().unwrap(), 0, "air state id");
+
+    let ack2 = read_until(&mut stream, 0x04, &[0x2C]);
+    let mut r = ReadBuf::new(&ack2);
+    assert_eq!(r.read_varint().unwrap(), 0x04);
+    assert_eq!(r.read_varint().unwrap(), 2, "ack sequence");
+
     let _ = child.kill();
+}
+
+/// 读取帧直到出现目标 packet id(容忍穿插的 keep alive)。
+fn read_until(stream: &mut TcpStream, target: i32, tolerate: &[i32]) -> Vec<u8> {
+    for _ in 0..10 {
+        let body = read_frame_compressed(stream);
+        let mut r = ReadBuf::new(&body);
+        let id = r.read_varint().unwrap();
+        if id == target {
+            return body;
+        }
+        assert!(tolerate.contains(&id), "unexpected packet id 0x{id:02x}");
+    }
+    panic!("packet 0x{target:02x} never received");
 }
 
 #[test]

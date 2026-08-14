@@ -5,6 +5,7 @@ pub mod blocks;
 pub mod blockstates;
 pub mod chunk;
 pub mod generator;
+pub mod items;
 pub mod network;
 pub mod noise;
 pub mod region;

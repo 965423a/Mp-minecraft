@@ -19,6 +19,10 @@
   minecraft-data 26.1 全局 block state ID(1168 blocks/29873 states,
   `blocks_pack.bin`)+ 原生调色板编码(BPE 0/4-8/15)+ WORLD_SURFACE
   高度图 + 全天空光 15。客户端可用 26.1 协议加载区块。
+- 方块交互:creative 模式;共享 World(Arc<Mutex>,缓存 + region 持久化),
+  Use Item On 放置(手持物品 → 方块)、Player Action 破坏,
+  回 Block Update + Acknowledge Block Change;Set Held Item /
+  Set Creative Mode Slot 维护虚拟背包(45 格)。
 - 注册表管线:`scripts/extract_registry.py` 从原版 client jar 提取
   13 个注册表 → `registry_pack.bin`(MREG 格式,341 entries)→
   `registry.rs` include_bytes! + JSON→NBT 转换 → Registry Data 包。

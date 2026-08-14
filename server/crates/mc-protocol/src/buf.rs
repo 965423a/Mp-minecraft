@@ -224,6 +224,15 @@ impl<'a> ReadBuf<'a> {
         Ok(f64::from_be_bytes(self.read_bytes(8)?.try_into().unwrap()))
     }
 
+    /// Position:i64 解出 (x, y, z)。
+    pub fn read_position(&mut self) -> Result<(i32, i32, i32)> {
+        let v = self.read_i64()?;
+        let x = (v >> 38) as i32;
+        let y = (v << 52 >> 52) as i32;
+        let z = (v << 26 >> 38) as i32;
+        Ok((x, y, z))
+    }
+
     pub fn read_varint(&mut self) -> Result<i32> {
         varint::decode_varint_i32(self.buf, &mut self.pos).ok_or(Error::InvalidVarInt)
     }

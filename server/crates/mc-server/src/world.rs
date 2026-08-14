@@ -102,14 +102,52 @@ pub fn load_chunk(world_dir: &Path, cx: i32, cz: i32) -> io::Result<mc_world::Ch
     Ok(c)
 }
 
-/// 加载区块;存档缺失时按 seed/wtype 重新生成(结果与预生成一致)。
-pub fn load_or_generate(
-    world_dir: &Path,
+/// 共享世界:内存缓存的已加载区块,变更后写回 region 存档。
+pub struct World {
+    world_dir: std::path::PathBuf,
     seed: u64,
     wtype: WorldType,
-    cx: i32,
-    cz: i32,
-) -> mc_world::Chunk {
-    RegionFile::load(world_dir, cx, cz)
-        .unwrap_or_else(|_| WorldGenerator::new(seed, wtype).generate(cx, cz))
+    chunks: std::collections::HashMap<(i32, i32), mc_world::Chunk>,
+}
+
+impl World {
+    pub fn open(world_dir: &Path, seed: u64, wtype: WorldType) -> Self {
+        World {
+            world_dir: world_dir.to_path_buf(),
+            seed,
+            wtype,
+            chunks: std::collections::HashMap::new(),
+        }
+    }
+
+    fn chunk(&mut self, cx: i32, cz: i32) -> &mut mc_world::Chunk {
+        self.chunks.entry((cx, cz)).or_insert_with(|| {
+            RegionFile::load(&self.world_dir, cx, cz)
+                .unwrap_or_else(|_| WorldGenerator::new(self.seed, self.wtype).generate(cx, cz))
+        })
+    }
+
+    pub fn get_block(&self, x: i32, y: i32, z: i32) -> u16 {
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        self.chunks
+            .get(&(cx, cz))
+            .map(|c| c.get(x, y, z))
+            .unwrap_or(mc_world::blocks::AIR)
+    }
+
+    pub fn set_block(&mut self, x: i32, y: i32, z: i32, id: u16) {
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        let (dir, seed, wtype) = (self.world_dir.clone(), self.seed, self.wtype);
+        let chunk = self.chunk(cx, cz);
+        chunk.set(x, y, z, id);
+        let _ = RegionFile::save(&dir, chunk, seed, wtype);
+    }
+
+    pub fn chunk_bytes(&mut self, cx: i32, cz: i32, biome: u16) -> (Vec<u8>, Vec<(u32, Vec<u64>)>) {
+        let chunk = self.chunk(cx, cz);
+        let heightmaps = mc_world::network::chunk_heightmaps(chunk);
+        let mut data = Vec::new();
+        mc_world::network::write_sections(chunk, biome, &mut data);
+        (data, heightmaps)
+    }
 }
