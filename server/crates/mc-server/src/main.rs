@@ -10,6 +10,7 @@ mod config;
 mod logger;
 mod network;
 mod protocol;
+mod registry;
 mod world;
 
 use config::ServerConfig;
@@ -24,7 +25,7 @@ pub const VERSION_NAME: &str = mc_protocol::consts::VERSION_NAME;
 
 /// 离线模式 UUID:用户名转 UUID v3(Mojang 规则 "OfflinePlayer:" + name)。
 pub fn offline_uuid(name: &str) -> [u8; 16] {
-    use std::hash::{BuildHasher, Hasher};
+    use std::hash::Hasher;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     h.write(("OfflinePlayer:".to_owned() + name).as_bytes());
     let v = h.finish() as u64;
@@ -86,12 +87,30 @@ fn main() -> ExitCode {
     let port = cfg.port;
     let motd = cfg.motd.clone();
     let max_players = cfg.max_players;
+    let view_distance = cfg.view_distance;
+    let seed = cfg.seed;
+    let flat = cfg.world_type() == mc_world::generator::WorldType::Superflat;
     log.info(&format!(
         "server listening on 0.0.0.0:{} (protocol 775, MC 26.1.2)",
         port
     ));
+    let registry = std::sync::Arc::new(registry::load_registry());
+    log.info(&format!(
+        "registry loaded: {} entries",
+        registry.entries.len()
+    ));
     match network::NetworkServer::bind(port, move |stream: TcpStream| {
-        let _ = protocol::handle_connection(stream, port, &motd, max_players);
+        let _ = protocol::handle_connection(
+            stream,
+            port,
+            &motd,
+            max_players,
+            view_distance,
+            (0.5, 65.0, 0.5),
+            seed,
+            flat,
+            &registry,
+        );
     }) {
         Ok(net) => {
             log.info("Done. This is a Mp-minecraft server.");

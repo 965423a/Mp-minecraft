@@ -2,12 +2,10 @@
 
 use crate::buf::{ReadBuf, Result, WriteBuf};
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 
 pub mod clientbound {
     use super::*;
-    use alloc::vec;
 
     pub const ID_JOIN_GAME: i32 = 0x31;
     pub const ID_CHUNK_DATA: i32 = 0x2D;
@@ -144,7 +142,6 @@ pub mod clientbound {
 
 pub mod serverbound {
     use super::*;
-    use alloc::vec;
 
     pub const ID_CONFIRM_TELEPORTATION: i32 = 0x00;
     pub const ID_KEEP_ALIVE: i32 = 0x1C;
@@ -194,7 +191,7 @@ pub mod serverbound {
     }
 
     /// Player Loaded (0x2C):无字段。
-    pub fn read_player_loaded(r: &mut ReadBuf) -> Result<()> {
+    pub fn read_player_loaded(_r: &mut ReadBuf) -> Result<()> {
         Ok(())
     }
 }

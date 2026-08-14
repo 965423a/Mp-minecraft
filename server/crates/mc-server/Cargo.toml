@@ -13,3 +13,7 @@ mc-world = { workspace = true }
 mc-protocol = { workspace = true }
 mc-hotpath = { workspace = true }
 flate2 = "1"
+serde_json = "1"
+
+[dev-dependencies]
+flate2 = "1"

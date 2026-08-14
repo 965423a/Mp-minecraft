@@ -2,7 +2,6 @@
 
 use crate::buf::{ReadBuf, Result, WriteBuf};
 use alloc::string::String;
-use alloc::vec::Vec;
 
 pub mod clientbound {
     use super::*;
@@ -51,7 +50,7 @@ pub mod serverbound {
     }
 
     /// Login Acknowledged (0x03):无字段,客户端已进入 Configuration。
-    pub fn read_login_acknowledged(r: &mut ReadBuf) -> Result<()> {
+    pub fn read_login_acknowledged(_r: &mut ReadBuf) -> Result<()> {
         Ok(())
     }
 }

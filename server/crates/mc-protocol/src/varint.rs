@@ -1,5 +1,5 @@
 //! VarInt / VarLong 编解码。
-use alloc::vec;
+
 use alloc::vec::Vec;
 
 /// 将一个 u32 编码为 VarInt 写入 `out`,返回写入字节数。

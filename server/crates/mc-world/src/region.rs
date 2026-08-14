@@ -18,7 +18,9 @@ const HEADER_SIZE: usize = 4 + 4 + 8 + 1 + 4;
 
 /// 世界存档目录(world/)下的元数据。
 pub struct RegionFile {
+    #[allow(dead_code)]
     cx: i32,
+    #[allow(dead_code)]
     cz: i32,
 }
 

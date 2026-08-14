@@ -11,6 +11,7 @@ pub struct ServerConfig {
     pub port: u16,
     pub motd: String,
     pub max_players: i32,
+    #[allow(dead_code)]
     pub spawn_radius: i32,
     pub view_distance: i32,
     pub online_mode: bool,
@@ -212,7 +213,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let cfg = ServerConfig::load_or_create(&dir);
         assert!(dir.join("server.properties").exists());
-        assert_eq!(cfg.world_type, "normal");
+        assert_eq!(cfg.world_type, "minecraft\\:normal");
         assert_ne!(cfg.seed, 0); // 随机种子
         let _ = fs::remove_dir_all(&dir);
     }

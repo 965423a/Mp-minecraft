@@ -105,3 +105,8 @@ struct Topology {
   无 node 感知——单 node 下正确,多 node 下未优化。
 - 当前内核:单核引导,无 AP 启动、无调度器、无 NUMA 内存池。
 - 本设计是这些缺失部分的蓝图;`mc-sched` 为调度/分片算法先行验证。
+
+## 7. 相关设计
+
+- `THREADED-REGIONS.md`:Folia 风格空间分区 tick 模型,
+  与本文档的 per-CPU 队列/工作窃取接合(region tick 任务按 node 哈希入队)。

@@ -135,7 +135,8 @@ fn login_to_configuration() {
     assert_eq!(set_comp.read_varint().unwrap(), 0x03);
     assert_eq!(set_comp.read_varint().unwrap(), 256);
 
-    let succ_frame = read_frame(&mut stream);
+    // 压缩已启用,后续收发走压缩格式
+    let succ_frame = read_frame_compressed(&mut stream);
     let mut succ = ReadBuf::new(&succ_frame);
     assert_eq!(succ.read_varint().unwrap(), 0x02);
     let uuid = succ.read_uuid().unwrap();
@@ -145,7 +146,7 @@ fn login_to_configuration() {
 
     let mut ack = WriteBuf::new();
     ack.write_varint(0x03);
-    write_frame(&mut stream, &ack.into_bytes());
+    write_frame_compressed(&mut stream, &ack.into_bytes());
 
     let mut ci = WriteBuf::new();
     ci.write_varint(0x00);
@@ -155,14 +156,14 @@ fn login_to_configuration() {
     ci.write_bool(true);
     ci.write_varint(0);
     ci.write_varint(0);
-    write_frame(&mut stream, &ci.into_bytes());
+    write_frame_compressed(&mut stream, &ci.into_bytes());
 
     let mut packs = WriteBuf::new();
     packs.write_varint(0x07);
-    write_frame(&mut stream, &packs.into_bytes());
+    write_frame_compressed(&mut stream, &packs.into_bytes());
 
     for i in 0..5 {
-        let body = read_frame(&mut stream);
+        let body = read_frame_compressed(&mut stream);
         let mut r = ReadBuf::new(&body);
         let id = r.read_varint().unwrap();
         assert!(
@@ -176,6 +177,184 @@ fn login_to_configuration() {
             assert_eq!(id, 0x03, "last packet must be finish configuration");
         }
     }
+    let _ = child.kill();
+}
+
+/// 压缩模式下发帧:长度前缀 + [未压缩长度 varint + 数据]。
+fn write_frame_compressed(stream: &mut TcpStream, packet: &[u8]) {
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(packet).unwrap();
+    let z = enc.finish().unwrap();
+    let mut body = Vec::with_capacity(z.len() + 5);
+    mc_protocol::varint::write_varint(packet.len() as u32, &mut body);
+    body.extend_from_slice(&z);
+    write_frame(stream, &body);
+}
+
+/// 压缩模式下收帧:长度前缀 + [未压缩长度 varint + zlib 数据]。
+fn read_frame_compressed(stream: &mut TcpStream) -> Vec<u8> {
+    use std::io::Read;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let mut len_bytes = [0u8; 5];
+    let mut pos = 0;
+    let len = loop {
+        stream.read_exact(&mut len_bytes[pos..pos + 1]).unwrap();
+        pos += 1;
+        let mut used = 0;
+        if let Some(v) = mc_protocol::varint::decode_varint_i32(&len_bytes[..pos], &mut used) {
+            break v;
+        }
+        if pos >= 5 {
+            panic!("bad length varint");
+        }
+    };
+    let mut body = vec![0u8; len as usize];
+    stream.read_exact(&mut body).unwrap();
+    let mut rp = 0usize;
+    let uncompressed_len = mc_protocol::varint::decode_varint_i32(&body, &mut rp).unwrap();
+    if uncompressed_len == 0 {
+        return body[rp..].to_vec();
+    }
+    let mut dec = flate2::read::ZlibDecoder::new(&body[rp..]);
+    let mut out = Vec::new();
+    dec.read_to_end(&mut out).unwrap();
+    assert_eq!(out.len() as i32, uncompressed_len);
+    out
+}
+
+#[test]
+fn play_full_flow() {
+    let (port, mut child) = start_server();
+    let mut stream = wait_port(port, std::time::Duration::from_secs(20));
+    let mut hs = WriteBuf::new();
+    hs.write_varint(0x00);
+    hs.write_varint(PROTOCOL_VERSION);
+    hs.write_string("127.0.0.1");
+    hs.write_u16(port);
+    hs.write_varint(2);
+    write_frame(&mut stream, &hs.into_bytes());
+
+    let mut start = WriteBuf::new();
+    start.write_varint(0x00);
+    start.write_string("Player1");
+    start.write_uuid([0u8; 16]);
+    write_frame(&mut stream, &start.into_bytes());
+
+    // Set Compression 在压缩开启前明文发送
+    let comp_frame = read_frame(&mut stream);
+    let mut set_comp = ReadBuf::new(&comp_frame);
+    assert_eq!(set_comp.read_varint().unwrap(), 0x03);
+    assert_eq!(set_comp.read_varint().unwrap(), 256);
+
+    // 此后服务器启用压缩,Login Success 走压缩格式
+    let succ_frame = read_frame_compressed(&mut stream);
+    let mut succ = ReadBuf::new(&succ_frame);
+    assert_eq!(succ.read_varint().unwrap(), 0x02);
+
+    // Login Acknowledged(此后所有发送走压缩格式)
+    let mut ack = WriteBuf::new();
+    ack.write_varint(0x03);
+    write_frame_compressed(&mut stream, &ack.into_bytes());
+
+    // Client Information
+    let mut ci = WriteBuf::new();
+    ci.write_varint(0x00);
+    ci.write_string("en_us");
+    ci.write_u8(0x7f);
+    ci.write_varint(0);
+    ci.write_bool(true);
+    ci.write_varint(0);
+    ci.write_varint(0);
+    write_frame_compressed(&mut stream, &ci.into_bytes());
+
+    // Known Packs
+    let mut packs = WriteBuf::new();
+    packs.write_varint(0x07);
+    write_frame_compressed(&mut stream, &packs.into_bytes());
+
+    for i in 0..5 {
+        let body = read_frame_compressed(&mut stream);
+        let mut r = ReadBuf::new(&body);
+        let id = r.read_varint().unwrap();
+        assert!(
+            [0x07, 0x0C, 0x0D, 0x0E, 0x03].contains(&id),
+            "unexpected configuration packet id 0x{id:02x}"
+        );
+        if i == 4 {
+            assert_eq!(id, 0x03);
+        }
+    }
+
+    // Acknowledge Finish Configuration → 进入 Play
+    let mut fin = WriteBuf::new();
+    fin.write_varint(0x03);
+    write_frame_compressed(&mut stream, &fin.into_bytes());
+
+    // 服务器应发送:Join Game + Player Info + Sync Position + Keep Alive 节拍
+    let join = read_frame_compressed(&mut stream);
+    let mut r = ReadBuf::new(&join);
+    assert_eq!(r.read_varint().unwrap(), 0x31);
+    let entity_id = r.read_i32().unwrap();
+    assert_eq!(entity_id, 1);
+    let hardcore = r.read_bool().unwrap();
+    assert!(!hardcore);
+    let dims_len = r.read_varint().unwrap();
+    assert_eq!(dims_len, 3);
+    for _ in 0..3 {
+        r.read_string().unwrap();
+    }
+    r.read_varint().unwrap(); // max players
+    r.read_varint().unwrap(); // view distance
+    r.read_varint().unwrap(); // sim distance
+    r.read_bool().unwrap(); // reduced debug info
+    r.read_bool().unwrap(); // enable respawn screen
+    r.read_bool().unwrap(); // limited crafting
+    r.read_varint().unwrap(); // dimension type
+    assert_eq!(r.read_string().unwrap(), "minecraft:overworld");
+
+    // Player Info Update
+    let pi = read_frame_compressed(&mut stream);
+    let mut r = ReadBuf::new(&pi);
+    assert_eq!(r.read_varint().unwrap(), 0x46);
+    assert_eq!(r.read_u8().unwrap(), 0x01);
+    assert_eq!(r.read_varint().unwrap(), 1);
+
+    // Sync Player Position
+    let pos = read_frame_compressed(&mut stream);
+    let mut r = ReadBuf::new(&pos);
+    assert_eq!(r.read_varint().unwrap(), 0x48);
+    let teleport_id = r.read_varint().unwrap();
+    assert_eq!(r.read_f64().unwrap(), 0.5);
+    assert_eq!(r.read_f64().unwrap(), 65.0);
+
+    // 回 Confirm Teleportation
+    let mut ct = WriteBuf::new();
+    ct.write_varint(0x00);
+    ct.write_varint(teleport_id);
+    write_frame_compressed(&mut stream, &ct.into_bytes());
+
+    // Keep Alive 节拍(压缩格式收)
+    let ka = read_frame_compressed(&mut stream);
+    let mut r = ReadBuf::new(&ka);
+    assert_eq!(r.read_varint().unwrap(), 0x2C);
+    let ka_id = r.read_i64().unwrap();
+    assert!(ka_id > 0);
+
+    // 回 Keep Alive 应答
+    let mut ka_ack = WriteBuf::new();
+    ka_ack.write_varint(0x1C);
+    ka_ack.write_i64(ka_id);
+    write_frame_compressed(&mut stream, &ka_ack.into_bytes());
+
+    // 再等一个 Keep Alive,证明循环继续
+    let ka2 = read_frame_compressed(&mut stream);
+    let mut r = ReadBuf::new(&ka2);
+    assert_eq!(r.read_varint().unwrap(), 0x2C);
+    assert_eq!(r.read_i64().unwrap(), ka_id + 1);
     let _ = child.kill();
 }
 

@@ -6,7 +6,7 @@ extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
-use core::ffi::{c_char, c_void};
+use core::ffi::c_char;
 
 // ---------------- FFI 声明 ----------------
 
