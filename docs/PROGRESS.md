@@ -35,6 +35,17 @@
 - 安装界面:语言/时区/键盘选择、EULA 第一步,Y/N 交互,QEMU 验证。
 - 硬浮点:消除 soft-float,SSE2 硬件浮点(验证 mulsd 出现在反汇编,
   软浮点符号为 0)。
+- 系统命令行:默认进入,行编辑(退格/Shift/大写),命令
+  help/mem/ver/eula/install/reboot/ctrls,QEMU 验证。
+- 汉字显示:VGA 文本模式字库重载(plane 2 上传 0x80-0xFF 槽位,
+  汉字 16x16 = 左右两个 8x16 槽位),GB2312 16x16 点阵
+  (HZK16 262KB)+ 逻辑屏幕缓冲 + 滚动,一屏最多 64 汉字。
+- 拼音输入法:Ctrl+Space 中/英切换,前缀查表(206 拼音条目/
+  782 常用字),候选黑底窗框(光标下方,1-9 选字,空格/Esc 操作),
+  上屏 GB2312 双字节;内核数据包:boot/data/hzk16.bin +
+  pinyin_pack.bin(scripts/gen_pinyin.py 生成)。
+- 服务器控制台:`ctrls` 进入,help/start/stop/list/say(支持中文
+  广播)/version/exit,exit 返回系统命令行,QEMU 验证。
 
 ## 决策记录(已定案)
 
