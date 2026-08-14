@@ -11,8 +11,7 @@ use std::io::{self, Read};
 use std::path::Path;
 
 const MAGIC: &[u8; 4] = b"MCSR";
-const VERSION: u32 = 2;
-const BIT_DEPTH: u32 = 6; // 0..63 的方块 ID 足够
+const VERSION: u32 = 3;
 const ENTRY_SIZE: usize = 16;
 const HEADER_SIZE: usize = 4 + 4 + 8 + 1 + 4;
 
@@ -50,6 +49,25 @@ fn read_entries(buf: &[u8]) -> io::Result<Vec<(i32, i32, usize, usize)>> {
     Ok(entries)
 }
 
+/// 一个 section 需要的位深:覆盖最大 state ID(全局 ID 最大约 29872,需 15 位)。
+fn section_bits(s: &Section) -> u32 {
+    let mut max = 0u16;
+    for i in 0..crate::chunk::SECTION_VOLUME {
+        let v = s.get(i % 16, i / 256, (i / 16) % 16);
+        if v > max {
+            max = v;
+        }
+    }
+    if max == 0 {
+        return 0;
+    }
+    let mut bits = 4;
+    while (1u32 << bits) <= max as u32 && bits < 32 {
+        bits += 1;
+    }
+    bits
+}
+
 /// 将一个区块序列化为数据区内容。
 fn chunk_bytes(chunk: &Chunk) -> Vec<u8> {
     let mut out = Vec::with_capacity(24 * 3077);
@@ -59,8 +77,9 @@ fn chunk_bytes(chunk: &Chunk) -> Vec<u8> {
             out.extend_from_slice(&0u32.to_be_bytes());
             continue;
         }
-        out.push(BIT_DEPTH as u8);
-        let packed = s.pack(BIT_DEPTH);
+        let bits = section_bits(s);
+        out.push(bits as u8);
+        let packed = s.pack(bits);
         out.extend_from_slice(&(packed.len() as u32).to_be_bytes());
         for l in &packed {
             out.extend_from_slice(&l.to_be_bytes());
@@ -225,12 +244,12 @@ mod tests {
         let dir = std::env::temp_dir().join("mcs-region-test2");
         let _ = fs::remove_dir_all(&dir);
         let mut c = Chunk::new(0, 0);
-        c.set(0, MIN_Y, 0, 7);
-        c.set(7, 100, 9, 2);
+        c.set(0, MIN_Y, 0, crate::blocks::BEDROCK);
+        c.set(7, 100, 9, crate::blocks::GRASS_BLOCK);
         RegionFile::save(&dir, &c, 1, WorldType::Superflat).unwrap();
         let loaded = RegionFile::load(&dir, 0, 0).unwrap();
-        assert_eq!(loaded.get(0, MIN_Y, 0), 7);
-        assert_eq!(loaded.get(7, 100, 9), 2);
+        assert_eq!(loaded.get(0, MIN_Y, 0), crate::blocks::BEDROCK);
+        assert_eq!(loaded.get(7, 100, 9), crate::blocks::GRASS_BLOCK);
         let _ = fs::remove_dir_all(&dir);
     }
 

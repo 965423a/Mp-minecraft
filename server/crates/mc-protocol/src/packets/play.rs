@@ -12,6 +12,10 @@ pub mod clientbound {
     pub const ID_KEEP_ALIVE: i32 = 0x2C;
     pub const ID_SYNC_PLAYER_POSITION: i32 = 0x48;
     pub const ID_PLAYER_INFO_UPDATE: i32 = 0x46;
+    pub const ID_CHUNK_BATCH_FINISHED: i32 = 0x0B;
+    pub const ID_CHUNK_BATCH_START: i32 = 0x0C;
+    pub const ID_SET_CHUNK_CACHE_CENTER: i32 = 0x5E;
+    pub const ID_SET_DEFAULT_SPAWN_POSITION: i32 = 0x61;
 
     #[derive(Debug, Clone)]
     pub struct JoinGame {
@@ -114,9 +118,32 @@ pub mod clientbound {
         }
     }
 
+    /// Chunk Batch Start (0x0C):无字段。
+    pub fn write_chunk_batch_start(w: &mut WriteBuf) {
+        w.write_varint(ID_CHUNK_BATCH_START);
+    }
+
+    /// Chunk Batch Finished (0x0B):batch 内区块数。
+    pub fn write_chunk_batch_finished(w: &mut WriteBuf, batch_size: i32) {
+        w.write_varint(ID_CHUNK_BATCH_FINISHED);
+        w.write_varint(batch_size);
+    }
+
+    /// Set Center Chunk (0x5E):客户端区块加载区域中心。
+    pub fn write_set_chunk_cache_center(w: &mut WriteBuf, chunk_x: i32, chunk_z: i32) {
+        w.write_varint(ID_SET_CHUNK_CACHE_CENTER);
+        w.write_i32(chunk_x);
+        w.write_i32(chunk_z);
+    }
+
+    /// Set Default Spawn Position (0x61):Position + 角度。
+    pub fn write_set_default_spawn_position(w: &mut WriteBuf, x: i32, y: i32, z: i32, angle: f32) {
+        w.write_varint(ID_SET_DEFAULT_SPAWN_POSITION);
+        w.write_position(x, y, z);
+        w.write_f32(angle);
+    }
+
     /// Chunk Data and Update Light (0x2D)。
-    /// 字段:ChunkX, ChunkZ, Heightmaps(前缀数组), Data(前缀字节数组),
-    ///      Block Entities(前缀数组), Light(变长,读到包尾)。
     pub fn write_chunk_data(
         w: &mut WriteBuf,
         chunk_x: i32,

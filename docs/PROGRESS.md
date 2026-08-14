@@ -14,6 +14,11 @@
   Update Tags / Finish 五包下发。
 - Play 最小集:Join Game、Player Info Update、Sync Player Position、
   Keep Alive 20 TPS 节拍。
+- 区块下发:Set Center Chunk + Chunk Batch Start + Chunk Data +
+  Batch Finished + Set Default Spawn Position;出生点 3x3 网格,
+  minecraft-data 26.1 全局 block state ID(1168 blocks/29873 states,
+  `blocks_pack.bin`)+ 原生调色板编码(BPE 0/4-8/15)+ WORLD_SURFACE
+  高度图 + 全天空光 15。客户端可用 26.1 协议加载区块。
 - 注册表管线:`scripts/extract_registry.py` 从原版 client jar 提取
   13 个注册表 → `registry_pack.bin`(MREG 格式,341 entries)→
   `registry.rs` include_bytes! + JSON→NBT 转换 → Registry Data 包。

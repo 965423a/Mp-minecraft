@@ -101,3 +101,15 @@ pub fn load_chunk(world_dir: &Path, cx: i32, cz: i32) -> io::Result<mc_world::Ch
     debug_assert!(c.height_at(8, 8) >= MIN_Y && c.height_at(8, 8) < MAX_Y);
     Ok(c)
 }
+
+/// 加载区块;存档缺失时按 seed/wtype 重新生成(结果与预生成一致)。
+pub fn load_or_generate(
+    world_dir: &Path,
+    seed: u64,
+    wtype: WorldType,
+    cx: i32,
+    cz: i32,
+) -> mc_world::Chunk {
+    RegionFile::load(world_dir, cx, cz)
+        .unwrap_or_else(|_| WorldGenerator::new(seed, wtype).generate(cx, cz))
+}

@@ -162,7 +162,7 @@ fn login_to_configuration() {
     packs.write_varint(0x07);
     write_frame_compressed(&mut stream, &packs.into_bytes());
 
-    for i in 0..5 {
+    for _ in 0..30 {
         let body = read_frame_compressed(&mut stream);
         let mut r = ReadBuf::new(&body);
         let id = r.read_varint().unwrap();
@@ -173,11 +173,12 @@ fn login_to_configuration() {
         if id == 0x0E {
             assert_eq!(r.read_varint().unwrap(), 0, "known packs should be empty");
         }
-        if i == 4 {
-            assert_eq!(id, 0x03, "last packet must be finish configuration");
+        if id == 0x03 {
+            let _ = child.kill();
+            return;
         }
     }
-    let _ = child.kill();
+    panic!("finish configuration never received");
 }
 
 /// 压缩模式下发帧:长度前缀 + [未压缩长度 varint + 数据]。
@@ -276,7 +277,8 @@ fn play_full_flow() {
     packs.write_varint(0x07);
     write_frame_compressed(&mut stream, &packs.into_bytes());
 
-    for i in 0..5 {
+    let mut finished = false;
+    for _ in 0..30 {
         let body = read_frame_compressed(&mut stream);
         let mut r = ReadBuf::new(&body);
         let id = r.read_varint().unwrap();
@@ -284,10 +286,12 @@ fn play_full_flow() {
             [0x07, 0x0C, 0x0D, 0x0E, 0x03].contains(&id),
             "unexpected configuration packet id 0x{id:02x}"
         );
-        if i == 4 {
-            assert_eq!(id, 0x03);
+        if id == 0x03 {
+            finished = true;
+            break;
         }
     }
+    assert!(finished, "finish configuration never received");
 
     // Acknowledge Finish Configuration → 进入 Play
     let mut fin = WriteBuf::new();
@@ -323,8 +327,43 @@ fn play_full_flow() {
     assert_eq!(r.read_u8().unwrap(), 0x01);
     assert_eq!(r.read_varint().unwrap(), 1);
 
-    // Sync Player Position
-    let pos = read_frame_compressed(&mut stream);
+    // 区块序列:Set Center Chunk(0x5E)+ Spawn Position(0x61)+ Batch Start(0x0C)
+    // + 9 × Chunk Data(0x2D)+ Batch Finished(0x0B),然后才到 Sync Position(0x48)
+    let mut chunk_count = 0;
+    let mut pos_pkt: Option<Vec<u8>> = None;
+    for _ in 0..20 {
+        let body = read_frame_compressed(&mut stream);
+        let mut r = ReadBuf::new(&body);
+        let id = r.read_varint().unwrap();
+        match id {
+            0x2C => continue,
+            0x5E => {
+                let cx = r.read_i32().unwrap();
+                let cz = r.read_i32().unwrap();
+                assert_eq!((cx, cz), (0, 0));
+            }
+            0x61 => {
+                assert!(r.finished() || r.remaining() >= 12, "spawn pos fields");
+            }
+            0x0C => {}
+            0x2D => {
+                chunk_count += 1;
+                let cx = r.read_i32().unwrap();
+                let cz = r.read_i32().unwrap();
+                assert!((-1..=1).contains(&cx) && (-1..=1).contains(&cz));
+            }
+            0x0B => {
+                assert_eq!(r.read_varint().unwrap(), 9, "batch size");
+            }
+            0x48 => {
+                pos_pkt = Some(body);
+                break;
+            }
+            other => panic!("unexpected play packet id 0x{other:02x}"),
+        }
+    }
+    assert_eq!(chunk_count, 9, "expected 9 chunk data packets");
+    let pos = pos_pkt.expect("sync player position packet");
     let mut r = ReadBuf::new(&pos);
     assert_eq!(r.read_varint().unwrap(), 0x48);
     let teleport_id = r.read_varint().unwrap();

@@ -47,6 +47,8 @@ pub fn handle_connection(
     spawn: (f64, f64, f64),
     seed: u64,
     flat: bool,
+    world_dir: &std::path::Path,
+    wtype: mc_world::generator::WorldType,
     registry: &crate::registry::Registry,
 ) -> io::Result<()> {
     stream.set_nodelay(true)?;
@@ -115,6 +117,8 @@ pub fn handle_connection(
                     max_players,
                     view_distance,
                     spawn,
+                    world_dir,
+                    wtype,
                     registry,
                 )? {
                     return Ok(());
@@ -253,6 +257,8 @@ fn handle_configuration(
     max_players: i32,
     view_distance: i32,
     spawn: (f64, f64, f64),
+    world_dir: &std::path::Path,
+    wtype: mc_world::generator::WorldType,
     registry: &crate::registry::Registry,
 ) -> io::Result<bool> {
     use mc_protocol::packets::configuration;
@@ -288,7 +294,9 @@ fn handle_configuration(
         }
         configuration::serverbound::ID_ACK_FINISH_CONFIGURATION => {
             conn.state = State::Play;
-            let ok = send_play_init(stream, conn, max_players, view_distance, spawn, *compressed);
+            let ok = send_play_init(
+                stream, conn, max_players, view_distance, spawn, world_dir, wtype, *compressed,
+            );
             ok.map(|_| true)
         }
         _ => Ok(false),
@@ -331,13 +339,14 @@ fn handle_play(
     }
 }
 
-/// 进入 Play 后发送初始包:Join Game + Player Info + 空区块数据 + 位置同步。
-pub fn send_play_init(
-    stream: &mut TcpStream,
+/// 进入 Play 后发送初始包:Join Game + Player Info + 区块 + 位置同步。
+pub fn send_play_init(    stream: &mut TcpStream,
     conn: &mut ConnInfo,
     max_players: i32,
     view_distance: i32,
     spawn: (f64, f64, f64),
+    world_dir: &std::path::Path,
+    wtype: mc_world::generator::WorldType,
     compressed: bool,
 ) -> io::Result<()> {
     use mc_protocol::packets::play::clientbound as cb;
@@ -379,6 +388,42 @@ pub fn send_play_init(
     cb::write_player_info_add(&mut p, conn.uuid, &conn.name, &[]);
     send_packet_compressed(stream, &p.into_bytes(), COMPRESSION_THRESHOLD, compressed)?;
 
+    // 区块:出生点 3x3 网格
+    let spawn_chunk_x = (spawn.0.floor() as i32).div_euclid(16);
+    let spawn_chunk_z = (spawn.2.floor() as i32).div_euclid(16);
+    let light = mc_world::network::light_full();
+
+    let mut p = WriteBuf::new();
+    cb::write_set_chunk_cache_center(&mut p, spawn_chunk_x, spawn_chunk_z);
+    send_packet_compressed(stream, &p.into_bytes(), COMPRESSION_THRESHOLD, compressed)?;
+
+    let mut p = WriteBuf::new();
+    cb::write_set_default_spawn_position(&mut p, 0, 65, 0, 0.0);
+    send_packet_compressed(stream, &p.into_bytes(), COMPRESSION_THRESHOLD, compressed)?;
+
+    let mut p = WriteBuf::new();
+    cb::write_chunk_batch_start(&mut p);
+    send_packet_compressed(stream, &p.into_bytes(), COMPRESSION_THRESHOLD, compressed)?;
+
+    let mut sent = 0;
+    for cx in (spawn_chunk_x - 1)..=(spawn_chunk_x + 1) {
+        for cz in (spawn_chunk_z - 1)..=(spawn_chunk_z + 1) {
+            let chunk = crate::world::load_or_generate(world_dir, conn.hashed_seed as u64, wtype, cx, cz);
+            let hms = mc_world::network::chunk_heightmaps(&chunk);
+            let heightmaps: Vec<(&[u64], u32)> = hms.iter().map(|(ty, d)| (d.as_slice(), *ty)).collect();
+            let mut data = Vec::new();
+            mc_world::network::write_sections(&chunk, PLAINS_BIOME, &mut data);
+            let mut p = WriteBuf::new();
+            cb::write_chunk_data(&mut p, cx, cz, &heightmaps, &data, &[], &light);
+            send_packet_compressed(stream, &p.into_bytes(), COMPRESSION_THRESHOLD, compressed)?;
+            sent += 1;
+        }
+    }
+
+    let mut p = WriteBuf::new();
+    cb::write_chunk_batch_finished(&mut p, sent);
+    send_packet_compressed(stream, &p.into_bytes(), COMPRESSION_THRESHOLD, compressed)?;
+
     conn.teleport_id += 1;
     let mut p = WriteBuf::new();
     cb::write_sync_player_position(
@@ -396,6 +441,9 @@ pub fn send_play_init(
     );
     send_packet_compressed(stream, &p.into_bytes(), COMPRESSION_THRESHOLD, compressed)
 }
+
+/// 原版 26.1 biome 注册表中 minecraft:plains 的 ID。
+const PLAINS_BIOME: u16 = 40;
 
 /// 20TPS tick:发送 Keep Alive(原版每 tick 发一次)。
 pub fn send_keep_alive(stream: &mut TcpStream, conn: &mut ConnInfo, compressed: bool) -> io::Result<()> {

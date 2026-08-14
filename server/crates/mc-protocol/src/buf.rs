@@ -83,6 +83,12 @@ impl WriteBuf {
         self.data.extend_from_slice(&v.to_be_bytes());
     }
 
+    /// Position:x/z 各 26 位、y 12 位打包为 i64。
+    pub fn write_position(&mut self, x: i32, y: i32, z: i32) {
+        let v = ((x & 0x3FFFFFF) as i64) << 38 | ((z & 0x3FFFFFF) as i64) << 12 | (y & 0xFFF) as i64;
+        self.write_i64(v);
+    }
+
     pub fn write_f64(&mut self, v: f64) {
         self.data.extend_from_slice(&v.to_be_bytes());
     }

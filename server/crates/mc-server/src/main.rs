@@ -109,6 +109,8 @@ fn main() -> ExitCode {
             (0.5, 65.0, 0.5),
             seed,
             flat,
+            &world_dir,
+            wtype,
             &registry,
         );
     }) {

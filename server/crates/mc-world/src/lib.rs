@@ -2,8 +2,10 @@
 //! 简化实现,确定性生成:同种子同坐标 → 同一世界。
 
 pub mod blocks;
+pub mod blockstates;
 pub mod chunk;
 pub mod generator;
+pub mod network;
 pub mod noise;
 pub mod region;
 
