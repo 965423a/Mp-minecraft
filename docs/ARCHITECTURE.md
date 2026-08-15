@@ -50,3 +50,37 @@ iso/
 ├── scripts/           L4:Python/bash 管理工具
 └── dist/              ISO 产物
 ```
+
+## NUMA 子系统(骨架)
+
+> 目标:多路/多节点主机上按节点就近分配内存、调度 CPU。
+> 当前为骨架:拓扑解析 + 每节点帧链分配器已可用,节点间负载均衡/内存迁移为后续。
+
+### 拓扑来源(优先级)
+
+| 来源 | 机制 | 说明 |
+|---|---|---|
+| ACPI SRAT | 内存亲和(proximity→base+len)+ 处理器亲和(proximity→LAPIC ID) | QEMU `-numa` 生成,实体多路主板亦生成 |
+| 内核命令行 | `numa=<n>;<id>:<startMB>-<endMB>;...` | multiboot2 cmdline tag,无 ACPI 时兜底 |
+| 单节点 | 全可用内存归节点 0 | 无 NUMA 的主板默认 |
+
+### 数据结构
+
+- `NumaNode{ id, base, pages, free_head, free_cnt }` × 8(MAX_NODES)。
+- 每节点一条**空闲帧链**:空闲帧内容存 next 物理地址,零额外内存开销。
+- `CPU_NODES[(lapic_id, node)]`:SRAT 处理器亲和 → LAPIC ID 到节点索引。
+
+### 接口
+
+- `init(info) -> node_cnt`:扫描 multiboot2 mmap 的 usable 区间,排除内核镜像
+  (1MiB.._end),按节点串帧链(高端向低端)。
+- `alloc_local(node) -> Option<u64>`:本地节点优先,耗尽跨节点 fallback。
+- `alloc() / free(phys) / node_of(phys)`、`node_mem(node) -> (MiB, free)`、
+  `node_for_lapic(lapic) -> Option<node>`(SMP 唤醒时标注 AP 所属节点)。
+- 地址全部 u64,帧对齐 4KiB,物理上限 16GiB(`MAX_PHYS`,与页表一致)。
+
+### 后续(未实现)
+
+- 节点间内存均衡分配器(按节点比例),任务调度器 CPU 亲和;
+- 冷/热内存迁移、页面回收跨节点 fallback 统计;
+- 每节点分配计数与 `info numa` 命令展示。

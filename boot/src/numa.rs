@@ -291,6 +291,7 @@ pub fn init(info: *const u8) -> usize {
                             break;
                         }
                         domains[cnt] = d;
+                        ranges[cnt].id = d as u8;
                         cnt += 1;
                         cnt - 1
                     }
@@ -354,6 +355,17 @@ pub fn init(info: *const u8) -> usize {
             }
         });
         NODE_CNT = cnt;
+        for n in 0..cnt {
+            let (mi, free) = node_mem(n);
+            crate::log!(
+                "numa: node {} id {} base {:#x} {mi} MiB, {free} frames free",
+                n,
+                ranges[n].id,
+                ranges[n].start
+            );
+        }
+        let cpu_entries = CPU_NODE_CNT;
+        crate::log!("numa: {cnt} nodes, {cpu_entries} cpu->node entries");
         cnt
     }
 }
