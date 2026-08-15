@@ -145,6 +145,12 @@ unsafe fn patch_tramp(gdt_limit: u32, gdt_base: u64, cr3v: u64, stack: u64, read
 /// AP 内核入口:trampoline 在 READY 写完后直接跳到这里。
 /// 屏蔽本核 LVT0/LVT1,进入空闲循环(计数递增),证明 AP 真正运行内核代码。
 #[unsafe(no_mangle)]
+/// 并发压力测试:AP 周期性执行 分配 → 写模式 → 校验 → 释放,
+/// 与 BSP/其他 AP 竞争帧链,校验自旋锁与链的完整性。
+/// rounds/fails 供 BSP 侧(monitor/gdb)检查;失败置 FLAKY 标志并停机。
+pub static AP_STRESS: [core::sync::atomic::AtomicU64; 64] = [const { core::sync::atomic::AtomicU64::new(0) }; 64];
+pub static AP_STRESS_FAILS: [core::sync::atomic::AtomicU64; 64] = [const { core::sync::atomic::AtomicU64::new(0) }; 64];
+
 pub extern "C" fn ap_entry(ap_id: u32) -> ! {
     let apic = 0xFEE0_0000u64;
     unsafe {
@@ -154,9 +160,39 @@ pub extern "C" fn ap_entry(ap_id: u32) -> ! {
     }
     crate::log!("smp: AP{ap_id} entering idle loop");
     let tpu = unsafe { TSC_PER_US };
+    let lapic_id = unsafe { (apic as *mut u32).add(0x20 / 4).read_volatile() >> 24 };
+    let node = crate::numa::node_for_lapic(lapic_id).unwrap_or(0);
     loop {
         usleep(1_000, tpu);
         AP_TICKS[ap_id as usize].fetch_add(1, Ordering::Relaxed);
+        let ticks = AP_TICKS[ap_id as usize].load(Ordering::Relaxed);
+        if ticks % 512 == 0 {
+            // 压力测试:每轮 64 次 分配+写+校验+释放,优先本节点
+            let mut fails = 0u64;
+            let mut rounds = 0u64;
+            unsafe {
+                for _ in 0..64 {
+                    if let Some(p) = crate::numa::alloc_local(node) {
+                        let w = p as *mut u64;
+                        for i in 0..512 {
+                            w.add(i).write_volatile(i as u64 ^ 0x3C3C_3C3C_3C3C_3C3C);
+                        }
+                        for i in 0..512 {
+                            if w.add(i).read_volatile() != i as u64 ^ 0x3C3C_3C3C_3C3C_3C3C {
+                                fails += 1;
+                            }
+                        }
+                        crate::numa::free(p);
+                        rounds += 1;
+                    }
+                }
+            }
+            let f = AP_STRESS_FAILS[ap_id as usize].fetch_add(fails, Ordering::Relaxed) + fails;
+            AP_STRESS[ap_id as usize].fetch_add(rounds, Ordering::Relaxed);
+            if f > 0 {
+                crate::log!("smp: AP{ap_id} stress FAILED ({f})");
+            }
+        }
     }
 }
 
@@ -261,8 +297,19 @@ pub fn init() -> usize {
             if id == bsp {
                 continue;
             }
-            let stack =
-                (&AP_STACKS[ap] as *const u8 as u64) + AP_STACKS[ap].len() as u64;
+            let stack = match crate::numa::alloc_contig(
+                crate::numa::node_for_lapic(id).unwrap_or(0),
+                AP_STACK_SIZE / 4096,
+            ) {
+                Some(p) => {
+                    crate::log!("smp: AP{} stack from node-local memory", ap);
+                    p + AP_STACK_SIZE as u64
+                }
+                None => {
+                    crate::log!("smp: AP{} stack from static fallback", ap);
+                    (&AP_STACKS[ap] as *const u8 as u64) + AP_STACKS[ap].len() as u64
+                }
+            };
             let ready = &AP_READY[ap] as *const u32 as u64;
             AP_READY[ap] = 0;
             patch_tramp(gdt_limit, gdt_base, cr3v, stack, ready, ap as u32);

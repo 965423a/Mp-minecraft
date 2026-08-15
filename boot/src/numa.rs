@@ -491,6 +491,60 @@ pub fn alloc_interleave() -> Option<u64> {
     r
 }
 
+/// 从节点 n 的帧链摘出 `n_frames` 个物理连续帧,返回起始地址。
+/// 帧链的 next 指针跨区间拼接,物理地址不单调,故扫描全链找连续段。
+/// 释放:对每帧分别 `free(start + k*0x1000)` 即可。
+pub fn alloc_contig(node: usize, n_frames: usize) -> Option<u64> {
+    NODES_LOCK.lock();
+    let r = unsafe {
+        if n_frames == 0 || n_frames > 1024 || node >= NODE_CNT {
+            None
+        } else {
+            alloc_contig_locked(node, n_frames)
+        }
+    };
+    NODES_LOCK.unlock();
+    r
+}
+
+fn alloc_contig_locked(node: usize, n: usize) -> Option<u64> {
+    unsafe {
+        let mut prev: u64 = 0;
+        let mut cur = NODES[node].free_head;
+        while cur != 0 {
+            let start = cur;
+            let mut ok = true;
+            for k in 0..n - 1 {
+                let nxt = (cur as *const u64).read_volatile();
+                if nxt != cur + 0x1000 {
+                    ok = false;
+                    break;
+                }
+                cur = nxt;
+            }
+            if ok {
+                let after = ((start + (n as u64 - 1) * 0x1000) as *const u64).read_volatile();
+                if prev == 0 {
+                    NODES[node].free_head = after;
+                } else {
+                    (prev as *mut u64).write_volatile(after);
+                }
+                NODES[node].free_cnt -= n as u64;
+                NODES[node].alloc_cnt += n as u64;
+                return Some(start);
+            }
+            // 失败:start 保留在链中,下一候选起点 = 链中下一帧
+            let nxt = (start as *const u64).read_volatile();
+            if nxt == 0 {
+                break;
+            }
+            cur = nxt;
+            prev = start;
+        }
+        None
+    }
+}
+
 fn alloc_interleave_locked() -> Option<u64> {
     unsafe {
         for _ in 0..NODE_CNT {
@@ -657,6 +711,46 @@ pub fn selftest() {
             crate::log!("numa:   invalid free rejected OK");
         } else {
             crate::log!("numa:   invalid free NOT rejected (BUG)");
+        }
+        // 5. 分配 + 写入模式 + 校验:验证页表映射与内存真实可用(含高端帧)
+        for n in 0..nn {
+            if let Some(p) = alloc_local(n) {
+                let w = p as *mut u64;
+                for i in 0..512 {
+                    w.add(i).write_volatile(i as u64 ^ 0x5A5A_5A5A_5A5A_5A5A);
+                }
+                let mut ok = true;
+                for i in 0..512 {
+                    if w.add(i).read_volatile() != i as u64 ^ 0x5A5A_5A5A_5A5A_5A5A {
+                        ok = false;
+                    }
+                }
+                free(p);
+                if ok {
+                    crate::log!("numa:   rw-check node {n} @ 0x{p:x} OK");
+                } else {
+                    crate::log!("numa:   rw-check node {n} @ 0x{p:x} FAILED");
+                }
+            } else {
+                crate::log!("numa:   rw-check node {n} alloc failed");
+            }
+        }
+        // 6. 连续多帧分配(alloc_contig):4 帧(16KiB)必须物理连续
+        if let Some(p) = alloc_contig(0, 4) {
+            let mut contig = true;
+            for k in 0..4 {
+                if node_of(p + k * 0x1000) != 0 {
+                    contig = false;
+                }
+                free(p + k * 0x1000);
+            }
+            if contig {
+                crate::log!("numa:   contig(0,4) @ 0x{p:x} OK");
+            } else {
+                crate::log!("numa:   contig(0,4) @ 0x{p:x} BAD");
+            }
+        } else {
+            crate::log!("numa:   contig(0,4) failed");
         }
         crate::log!("numa: selftest done");
     }
