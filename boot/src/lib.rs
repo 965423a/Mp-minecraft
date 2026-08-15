@@ -928,28 +928,62 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                 }
             }
             b"numa" => {
-                let _ = writeln!(vga, "  NUMA topology: {} nodes", numa::node_count());
-                for n in 0..numa::node_count() {
+                let ncnt = numa::node_count();
+                let _ = writeln!(vga, "  NUMA topology: {ncnt} nodes");
+                for n in 0..ncnt {
                     let (mb, free) = numa::node_mem(n);
-                    let _ = writeln!(vga, "    node {}: {} MiB, {} free frames", n, mb, free);
+                    let allocs = numa::node_allocs(n);
+                    let mut laps = [0u32; 64];
+                    let nl = numa::node_lapics(n, &mut laps);
+                    let _ = write!(
+                        vga,
+                        "    node {} (domain {}): {} MiB, {} free, {} allocs, cpus:",
+                        n,
+                        numa::node_id(n),
+                        mb,
+                        free,
+                        allocs
+                    );
+                    for i in 0..nl {
+                        let _ = write!(vga, " {:#x}", laps[i]);
+                    }
+                    let _ = writeln!(vga);
                 }
-                let _ = writeln!(vga, "  local alloc test (1 frame per node):");
-                let mut frames = [0u64; 8];
+                if ncnt > 1 {
+                    let _ = writeln!(vga, "  distance matrix:");
+                    let _ = write!(vga, "    d |");
+                    for j in 0..ncnt {
+                        let _ = write!(vga, " {:>3}", j);
+                    }
+                    let _ = writeln!(vga);
+                    for i in 0..ncnt {
+                        let _ = write!(vga, "    {} |", i);
+                        for j in 0..ncnt {
+                            let _ = write!(vga, " {:>3}", numa::node_distance(i, j));
+                        }
+                        let _ = writeln!(vga);
+                    }
+                }
+                let _ = writeln!(vga, "  allocation policies:");
+                let mut frames = [0u64; 16];
                 let mut got = 0;
-                for n in 0..numa::node_count() {
+                for n in 0..ncnt {
                     if let Some(p) = numa::alloc_local(n) {
                         frames[got] = p;
                         got += 1;
                         let owner = numa::node_of(p);
                         let _ = writeln!(
                             vga,
-                            "    node {} -> phys 0x{:x} (owner node {})",
-                            n,
-                            p,
-                            owner
+                            "    alloc_local({n}) -> 0x{p:x} (owner node {owner})"
                         );
-                    } else {
-                        let _ = writeln!(vga, "    node {} -> alloc failed", n);
+                    }
+                }
+                for _ in 0..(ncnt * 2) {
+                    if let Some(p) = numa::alloc_interleave() {
+                        frames[got] = p;
+                        got += 1;
+                        let owner = numa::node_of(p);
+                        let _ = writeln!(vga, "    alloc_interleave -> 0x{p:x} (node {owner})");
                     }
                 }
                 let _ = writeln!(vga, "  freeing {} frames...", got);
@@ -1401,6 +1435,7 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     fs::init();
     numa::init(mb2_info);
     smp::init();
+    numa::selftest();
     unsafe {
         CWD = 0;
         SERVER_RUNNING = false;

@@ -51,10 +51,12 @@ iso/
 └── dist/              ISO 产物
 ```
 
-## NUMA 子系统(骨架)
+## NUMA 子系统
 
 > 目标:多路/多节点主机上按节点就近分配内存、调度 CPU。
-> 当前为骨架:拓扑解析 + 每节点帧链分配器已可用,节点间负载均衡/内存迁移为后续。
+> 现状:拓扑解析(SRAT/命令行/单节点兜底)+ 每节点帧链分配器 +
+> 区间归属 + 距离矩阵 + 就近/交错分配策略,已在 QEMU 4GiB/2 节点验证;
+> 任务调度器 CPU 亲和与内存迁移为后续。
 
 ### 拓扑来源(优先级)
 
@@ -66,21 +68,28 @@ iso/
 
 ### 数据结构
 
-- `NumaNode{ id, base, pages, free_head, free_cnt }` × 8(MAX_NODES)。
-- 每节点一条**空闲帧链**:空闲帧内容存 next 物理地址,零额外内存开销。
+- `NumaNode{ id, pages, free_head, free_cnt, alloc_cnt, spans[8], span_cnt }` × 8(MAX_NODES)。
+- 每节点一条**空闲帧链**:空闲帧内容存 next 物理地址,零额外内存开销;
+  多个不连续区间按序入链(新区间接在旧链头之前,旧链保持可达)。
+- `spans[]` 记录节点全部 usable 区间,`node_of(phys)` 据此精确归属 ——
+  节点内存被 PCI hole 拆开(QEMU 4GiB/2 节点时 node1 = 2-3GiB + 4-5GiB 两段)也能正确判定。
+- `SLIT[64][64]` 节点距离矩阵(ACPI SLIT;无 SLIT 时默认同节点 10/跨节点 20)。
 - `CPU_NODES[(lapic_id, node)]`:SRAT 处理器亲和 → LAPIC ID 到节点索引。
 
 ### 接口
 
-- `init(info) -> node_cnt`:扫描 multiboot2 mmap 的 usable 区间,排除内核镜像
-  (1MiB.._end),按节点串帧链(高端向低端)。
-- `alloc_local(node) -> Option<u64>`:本地节点优先,耗尽跨节点 fallback。
+- `init(info) -> node_cnt`:扫描 multiboot2 mmap 的 usable 区间,排除低 1MiB
+  (实模式 IVT/BDA/EBDA/multiboot info/trampoline 区)与内核镜像,按节点串帧链。
+- `alloc_local(node) -> Option<u64>`:本地节点优先,耗尽按距离就近 fallback。
+- `alloc_interleave() -> Option<u64>`:跨节点轮转(interleave 策略)。
 - `alloc() / free(phys) / node_of(phys)`、`node_mem(node) -> (MiB, free)`、
   `node_for_lapic(lapic) -> Option<node>`(SMP 唤醒时标注 AP 所属节点)。
+- `node_distance(a, b) -> u8`:SLIT 距离;`node_allocs(node) -> u64` 分配计数。
+- `selftest()`:启动时自检(各策略分配/归还、节点归属、距离),失败即 panic。
 - 地址全部 u64,帧对齐 4KiB,物理上限 16GiB(`MAX_PHYS`,与页表一致)。
+- shell `numa` 命令:节点拓扑/距离矩阵/分配策略演示。
 
 ### 后续(未实现)
 
 - 节点间内存均衡分配器(按节点比例),任务调度器 CPU 亲和;
-- 冷/热内存迁移、页面回收跨节点 fallback 统计;
-- 每节点分配计数与 `info numa` 命令展示。
+- 冷/热内存迁移、页面回收跨节点 fallback 统计。

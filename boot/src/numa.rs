@@ -8,31 +8,47 @@
 //! 内存开销),本地节点优先,耗尽可跨节点 fallback。
 
 const MAX_NODES: usize = 8;
+const MAX_SPANS: usize = 8;
 
 /// 页表静态映射上限(与 boot.S 一致),超出部分不参与帧链。
 const MAX_PHYS: u64 = 16 * 1024 * 1024 * 1024;
 
+/// 无 SLIT 时的默认距离:同节点 10,跨节点 20(仅用于排序,非真实延迟)。
+const DIST_SAME: u8 = 10;
+const DIST_REMOTE: u8 = 20;
+
 #[derive(Clone, Copy)]
 struct NumaNode {
     id: u8,
-    base: u64,
     pages: u64,
     free_head: u64,
     free_cnt: u64,
+    alloc_cnt: u64,
+    /// 本节点 usable 区间集合(node_of 精确归属判定,支持不连续内存)。
+    spans: [(u64, u64); MAX_SPANS],
+    span_cnt: usize,
 }
 
 static mut NODES: [NumaNode; MAX_NODES] = [NumaNode {
     id: 0,
-    base: 0,
     pages: 0,
     free_head: 0,
     free_cnt: 0,
+    alloc_cnt: 0,
+    spans: [(0, 0); MAX_SPANS],
+    span_cnt: 0,
 }; MAX_NODES];
 static mut NODE_CNT: usize = 0;
 
 /// LAPIC ID → 节点索引 映射(来自 SRAT 处理器亲和)。
 static mut CPU_NODES: [(u32, usize); 64] = [(0, 0); 64];
 static mut CPU_NODE_CNT: usize = 0;
+
+/// SLIT 节点距离矩阵(无 SLIT 时用默认距离)。
+static mut SLIT_N: usize = 0;
+static mut SLIT: [[u8; 64]; 64] = [[0; 64]; 64];
+
+static mut INTERLEAVE_LAST: usize = 0;
 
 unsafe extern "C" {
     static _start: u8;
@@ -186,9 +202,11 @@ fn kernel_range() -> (u64, u64) {
     }
 }
 
-/// 把 [a, b) 的物理内存并入节点 n 的空闲链(帧对齐,排除内核镜像)。
+/// 把 [a, b) 的物理内存并入节点 n 的空闲链(帧对齐,排除内核镜像与低 1MiB)。
+/// 低 1MiB 含实模式 IVT/BDA/EBDA/multiboot info/trampoline 区,一律保留。
 fn add_span(n: usize, a0: u64, b0: u64) {
     let (ks, ke) = kernel_range();
+    let a0 = a0.max(1u64 << 20);
     // 与内核镜像求差,最多两段
     let mut a = (a0 + 0xFFF) & !0xFFF;
     let mut b = b0 & !0xFFF;
@@ -221,6 +239,13 @@ fn add_span(n: usize, a0: u64, b0: u64) {
         let sa = segs[s * 2];
         let sb = segs[s * 2 + 1];
         link_frames(n, sa, sb);
+        // 记录区间,供 node_of 精确归属
+        unsafe {
+            if NODES[n].span_cnt < MAX_SPANS {
+                NODES[n].spans[NODES[n].span_cnt] = (sa, sb);
+                NODES[n].span_cnt += 1;
+            }
+        }
     }
 }
 
@@ -251,9 +276,6 @@ fn link_frames(n: usize, a: u64, b: u64) {
             }
         }
         if cnt > 0 {
-            if NODES[n].free_cnt == 0 {
-                NODES[n].base = a;
-            }
             NODES[n].free_head = prev;
             NODES[n].free_cnt += cnt;
             NODES[n].pages += cnt;
@@ -337,10 +359,12 @@ pub fn init(info: *const u8) -> usize {
         for i in 0..cnt {
             NODES[i] = NumaNode {
                 id: ranges[i].id,
-                base: 0,
                 pages: 0,
                 free_head: 0,
                 free_cnt: 0,
+                alloc_cnt: 0,
+                spans: [(0, 0); MAX_SPANS],
+                span_cnt: 0,
             };
         }
         for_each_usable(info, |base, len| {
@@ -355,17 +379,36 @@ pub fn init(info: *const u8) -> usize {
             }
         });
         NODE_CNT = cnt;
+        // SLIT 距离矩阵(无则走默认距离)
+        SLIT_N = 0;
+        if let Some((sn, m)) = crate::acpi::slit_parse() {
+            SLIT_N = sn;
+            for i in 0..sn {
+                for j in 0..sn {
+                    SLIT[i][j] = m[i * 64 + j];
+                }
+            }
+        }
         for n in 0..cnt {
             let (mi, free) = node_mem(n);
+            let base = if NODES[n].span_cnt > 0 {
+                NODES[n].spans[0].0
+            } else {
+                0
+            };
             crate::log!(
                 "numa: node {} id {} base {:#x} {mi} MiB, {free} frames free",
                 n,
                 ranges[n].id,
-                ranges[n].start
+                base
             );
         }
         let cpu_entries = CPU_NODE_CNT;
         crate::log!("numa: {cnt} nodes, {cpu_entries} cpu->node entries");
+        if SLIT_N > 0 {
+            let d = node_distance(0, 1);
+            crate::log!("numa: slit {cnt} nodes, dist[0][1] = {d}");
+        }
         cnt
     }
 }
@@ -382,7 +425,22 @@ pub fn node_for_lapic(lapic: u32) -> Option<usize> {
     None
 }
 
-/// 本地节点优先分配一帧,失败则跨节点 fallback。返回物理地址。
+/// 节点间距离(SLIT 缺失时默认同节点 10 / 跨节点 20)。
+pub fn node_distance(i: usize, j: usize) -> u8 {
+    unsafe {
+        if SLIT_N == 0 || i >= SLIT_N || j >= SLIT_N {
+            if i == j {
+                DIST_SAME
+            } else {
+                DIST_REMOTE
+            }
+        } else {
+            SLIT[i][j]
+        }
+    }
+}
+
+/// 本地节点优先分配一帧;本地耗尽按 SLIT 距离就近 fallback。返回物理地址。
 pub fn alloc_local(node: usize) -> Option<u64> {
     unsafe {
         if NODE_CNT == 0 {
@@ -392,10 +450,19 @@ pub fn alloc_local(node: usize) -> Option<u64> {
         if NODES[n].free_cnt > 0 {
             return pop(n);
         }
+        let mut best = usize::MAX;
+        let mut best_d = 0u8;
         for i in 0..NODE_CNT {
             if i != n && NODES[i].free_cnt > 0 {
-                return pop(i);
+                let d = node_distance(n, i);
+                if best == usize::MAX || d < best_d {
+                    best = i;
+                    best_d = d;
+                }
             }
+        }
+        if best != usize::MAX {
+            return pop(best);
         }
         None
     }
@@ -404,6 +471,20 @@ pub fn alloc_local(node: usize) -> Option<u64> {
 /// 节点 0 优先分配。
 pub fn alloc() -> Option<u64> {
     alloc_local(0)
+}
+
+/// 交错分配:跨节点轮流取帧(round-robin)。
+pub fn alloc_interleave() -> Option<u64> {
+    unsafe {
+        for _ in 0..NODE_CNT {
+            INTERLEAVE_LAST = (INTERLEAVE_LAST + 1) % NODE_CNT;
+            let n = INTERLEAVE_LAST;
+            if NODES[n].free_cnt > 0 {
+                return pop(n);
+            }
+        }
+        None
+    }
 }
 
 fn pop(n: usize) -> Option<u64> {
@@ -415,17 +496,20 @@ fn pop(n: usize) -> Option<u64> {
         let next = (head as *const u64).read_volatile();
         NODES[n].free_head = next;
         NODES[n].free_cnt -= 1;
+        NODES[n].alloc_cnt += 1;
         Some(head)
     }
 }
 
-/// 按地址找所属节点。
+/// 按节点 usable 区间精确查所属节点(支持不连续内存)。
 pub fn node_of(phys: u64) -> usize {
     unsafe {
         for i in 0..NODE_CNT {
-            let n = &NODES[i];
-            if phys >= n.base && phys < n.base + n.pages * 0x1000 {
-                return i;
+            for s in 0..NODES[i].span_cnt {
+                let (a, b) = NODES[i].spans[s];
+                if phys >= a && phys < b {
+                    return i;
+                }
             }
         }
         0
@@ -457,5 +541,83 @@ pub fn node_mem(node: usize) -> (u64, u64) {
             return (0, 0);
         }
         (NODES[node].pages * 4 / 1024, NODES[node].free_cnt)
+    }
+}
+
+/// 节点 ACPI proximity domain id。
+pub fn node_id(node: usize) -> u8 {
+    unsafe {
+        if node >= NODE_CNT {
+            0
+        } else {
+            NODES[node].id
+        }
+    }
+}
+
+/// 节点累计分配帧数。
+pub fn node_allocs(node: usize) -> u64 {
+    unsafe {
+        if node >= NODE_CNT {
+            0
+        } else {
+            NODES[node].alloc_cnt
+        }
+    }
+}
+
+/// 填入节点下全部 LAPIC ID,返回数量。
+pub fn node_lapics(node: usize, out: &mut [u32; 64]) -> usize {
+    unsafe {
+        let mut k = 0;
+        for i in 0..CPU_NODE_CNT {
+            if CPU_NODES[i].1 == node && k < 64 {
+                out[k] = CPU_NODES[i].0;
+                k += 1;
+            }
+        }
+        k
+    }
+}
+
+/// 启动自检:验证本地分配归属、跨节点 fallback 计数与交错分布。
+/// 在 SMP 唤醒后调用(BSP 单线程,AP 不触碰分配器)。
+pub fn selftest() {
+    unsafe {
+        let nn = NODE_CNT;
+        crate::log!("numa: selftest start ({nn} nodes)");
+        // 1. 每节点本地分配,校验 node_of 归属
+        for n in 0..nn {
+            match alloc_local(n) {
+                Some(p) => {
+                    let owner = node_of(p);
+                    let ok = if owner == n { "OK" } else { "WRONG" };
+                    crate::log!("numa:   alloc_local({n}) -> 0x{p:x} owner {owner} {ok}");
+                    free(p);
+                }
+                None => crate::log!("numa:   alloc_local({n}) -> failed"),
+            }
+        }
+        // 2. 交错分配 8 帧,统计分布
+        let mut dist = [0u64; MAX_NODES];
+        for _ in 0..8 {
+            if let Some(p) = alloc_interleave() {
+                dist[node_of(p)] += 1;
+                free(p);
+            }
+        }
+        for n in 0..nn {
+            crate::log!("numa:   interleave[{}] = {}", n, dist[n]);
+        }
+        // 3. 距离矩阵
+        if nn > 1 {
+            for i in 0..nn {
+                for j in 0..nn {
+                    let d = node_distance(i, j);
+                    crate::log!("numa:   dist[{i}->{j}] = {d}");
+                }
+            }
+        }
+        crate::log!("numa: selftest done");
     }
 }
