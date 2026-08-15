@@ -2,14 +2,24 @@
 //! AP 经低内存 trampoline(0x7000)进入 64 位并标记就绪。
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 const TRAMP_DST: u64 = 0x7000;
 const ICR: u64 = 0x300;
 const AP_STACK_SIZE: usize = 16384;
 // tramp.S 内偏移(tramp_start 起,编译后 xxd 校准):
-const PARAM_OFF: u64 = 0xC0; // 参数区起点
+const PARAM_OFF: u64 = 0x100; // 参数区起点(与 tramp.S .set PARAM 一致)
 const PMODE_OFF: u64 = 0x2B; // pmode_entry(编译后校准)
 const LONG_OFF: u64 = 0x6A; // long_entry(编译后校准)
+// 参数区字段偏移(见 tramp.S 注释):
+const P_GDT_BASE: u64 = 0x02; // base u64
+const P_CR3: u64 = 0x0C; // u64
+const P_STACK: u64 = 0x14; // u64
+const P_READY: u64 = 0x1C; // u64
+const P_APID: u64 = 0x24; // u32
+const P_PMODE_IP: u64 = 0x28; // u16, +2 = CS
+const P_LONG_IP: u64 = 0x2C; // u32(经 32 位 lret 进入)
+const P_AP_ENTRY: u64 = 0x34; // u64
 
 unsafe extern "C" {
     static tramp_start: u8;
@@ -20,6 +30,9 @@ unsafe extern "C" {
 static mut AP_STACKS: [[u8; AP_STACK_SIZE]; 64] = [[0; AP_STACK_SIZE]; 64];
 static mut AP_READY: [u32; 64] = [0; 64];
 static mut AP_COUNT: usize = 1;
+static mut TSC_PER_US: u64 = 2500;
+/// AP 空闲循环计数(每 ~1ms 递增),验证 AP 确实在跑内核代码。
+static AP_TICKS: [AtomicU32; 64] = [const { AtomicU32::new(0) }; 64];
 
 fn outb(port: u16, val: u8) {
     unsafe {
@@ -118,15 +131,33 @@ unsafe fn mask_ioapic() {
 }
 
 /// 给 0x7000 的 trampoline 参数区(偏移 PARAM_OFF 起)打补丁。
+/// 全部地址字段按 u64 写入(栈/READY/CR3/GDT base/AP 入口),与 tramp.S 布局对应。
 unsafe fn patch_tramp(gdt_limit: u32, gdt_base: u64, cr3v: u64, stack: u64, ready: u64, apid: u32) {
     let p = TRAMP_DST as *mut u8;
     (p.add(PARAM_OFF as usize + 0x00) as *mut u16).write_volatile(gdt_limit as u16); // GDT limit
-    (p.add(PARAM_OFF as usize + 0x02) as *mut u32).write_volatile(gdt_base as u32); // base lo
-    (p.add(PARAM_OFF as usize + 0x06) as *mut u16).write_volatile((gdt_base >> 32) as u16); // base hi
-    (p.add(PARAM_OFF as usize + 0x08) as *mut u32).write_volatile(cr3v as u32);
-    (p.add(PARAM_OFF as usize + 0x0C) as *mut u32).write_volatile(stack as u32);
-    (p.add(PARAM_OFF as usize + 0x10) as *mut u32).write_volatile(ready as u32);
-    (p.add(PARAM_OFF as usize + 0x14) as *mut u32).write_volatile(apid);
+    (p.add(PARAM_OFF as usize + P_GDT_BASE as usize) as *mut u64).write_volatile(gdt_base);
+    (p.add(PARAM_OFF as usize + P_CR3 as usize) as *mut u64).write_volatile(cr3v);
+    (p.add(PARAM_OFF as usize + P_STACK as usize) as *mut u64).write_volatile(stack);
+    (p.add(PARAM_OFF as usize + P_READY as usize) as *mut u64).write_volatile(ready);
+    (p.add(PARAM_OFF as usize + P_APID as usize) as *mut u32).write_volatile(apid);
+}
+
+/// AP 内核入口:trampoline 在 READY 写完后直接跳到这里。
+/// 屏蔽本核 LVT0/LVT1,进入空闲循环(计数递增),证明 AP 真正运行内核代码。
+#[unsafe(no_mangle)]
+pub extern "C" fn ap_entry(ap_id: u32) -> ! {
+    let apic = 0xFEE0_0000u64;
+    unsafe {
+        (apic as *mut u32).add(0xF0 / 4).write_volatile(0x1FF); // SVR 使能 LAPIC
+        (apic as *mut u32).add(0x350 / 4).write_volatile(0x10000); // LVT0 屏蔽
+        (apic as *mut u32).add(0x360 / 4).write_volatile(0x10000); // LVT1 屏蔽
+    }
+    crate::log!("smp: AP{ap_id} entering idle loop");
+    let tpu = unsafe { TSC_PER_US };
+    loop {
+        usleep(1_000, tpu);
+        AP_TICKS[ap_id as usize].fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 unsafe fn wake_ap(apic_base: u64, id: u32, idx: usize, tpu: u64) -> bool {
@@ -181,6 +212,7 @@ pub fn init() -> usize {
             n
         );
         let tpu = tsc_per_us();
+        TSC_PER_US = tpu;
         // 复制 trampoline 到低内存
         let sz = &tramp_end as *const u8 as usize - &tramp_start as *const u8 as usize;
         if sz > 0x800 {
@@ -194,9 +226,11 @@ pub fn init() -> usize {
         // 打补丁:跳转目标 = 0x7000 + tramp 内偏移
         let pmode_off = PMODE_OFF;
         let long_off = LONG_OFF;
-        *((TRAMP_DST + PARAM_OFF + 0x18) as *mut u16) = (0x7000 + pmode_off) as u16;
-        *((TRAMP_DST + PARAM_OFF + 0x1A) as *mut u16) = 0x08;
-        *((TRAMP_DST + PARAM_OFF + 0x1C) as *mut u32) = (0x7000 + long_off) as u32;
+        let p = TRAMP_DST as *mut u8;
+        (p.add(PARAM_OFF as usize + P_PMODE_IP as usize) as *mut u16).write_volatile(0x7000 + pmode_off as u16);
+        (p.add(PARAM_OFF as usize + P_PMODE_IP as usize + 2) as *mut u16).write_volatile(0x08);
+        (p.add(PARAM_OFF as usize + P_LONG_IP as usize) as *mut u32).write_volatile(0x7000 + long_off as u32);
+        (p.add(PARAM_OFF as usize + P_AP_ENTRY as usize) as *mut u64).write_volatile(ap_entry as usize as u64);
         let gdp = &gdt_desc as *const u8;
         let gdt_limit = (gdp as *const u16).read_volatile() as u32;
         let gdt_base = (gdp.add(2) as *const u32).read_volatile() as u64

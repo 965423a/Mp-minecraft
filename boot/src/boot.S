@@ -57,7 +57,9 @@ _start:
     jz halt_error
 
     /* 2. 建立过渡恒等页表:2MiB 大页映射前 1GiB(仅用于进入 64 位;
-          完整 16GiB 映射由 Rust 侧 64 位代码 setup_paging() 建立) */
+           完整 16GiB 映射由 Rust 侧 64 位代码 setup_paging() 建立) */
+    /* 注意:此处所有地址均为 32 位绝对地址(.bss < 4GiB)。这是 32 位模式的
+       硬约束 —— 开启长模式前 CPU 在 32 位模式,CR3/内存操作数只有 32 位。 */
     movl $pml4, %eax
     movl %eax, %cr3
     /* PML4[0] -> PDPT */
@@ -106,8 +108,9 @@ _start:
 
 .code64
 long_start:
-    movq %rbp, %rdi      /* multiboot2 info */
-    movq %rdi, %r15      /* 保存 */
+    lgdt gdt_desc              /* 64 位 GDTR 重载:limit u16 + base u64(长模式读 10 字节) */
+    movq %rbp, %rdi            /* multiboot2 info(32 位模式下 ebp 保存,零扩展为 64 位) */
+    movq %rdi, %r15            /* 保存 */
     /* 数据段选择器 */
     movw $0x10, %ax
     movw %ax, %ds
