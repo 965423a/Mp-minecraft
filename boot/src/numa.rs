@@ -50,6 +50,9 @@ static mut SLIT: [[u8; 64]; 64] = [[0; 64]; 64];
 
 static mut INTERLEAVE_LAST: usize = 0;
 
+/// 帧链临界区锁(BSP 与 AP 并发分配/释放时保护空闲链)。
+static NODES_LOCK: crate::spinlock::SpinLock = crate::spinlock::SpinLock::new();
+
 unsafe extern "C" {
     static _start: u8;
     static _end: u8;
@@ -442,6 +445,13 @@ pub fn node_distance(i: usize, j: usize) -> u8 {
 
 /// 本地节点优先分配一帧;本地耗尽按 SLIT 距离就近 fallback。返回物理地址。
 pub fn alloc_local(node: usize) -> Option<u64> {
+    NODES_LOCK.lock();
+    let r = unsafe { alloc_local_locked(node) };
+    NODES_LOCK.unlock();
+    r
+}
+
+fn alloc_local_locked(node: usize) -> Option<u64> {
     unsafe {
         if NODE_CNT == 0 {
             return None;
@@ -475,6 +485,13 @@ pub fn alloc() -> Option<u64> {
 
 /// 交错分配:跨节点轮流取帧(round-robin)。
 pub fn alloc_interleave() -> Option<u64> {
+    NODES_LOCK.lock();
+    let r = unsafe { alloc_interleave_locked() };
+    NODES_LOCK.unlock();
+    r
+}
+
+fn alloc_interleave_locked() -> Option<u64> {
     unsafe {
         for _ in 0..NODE_CNT {
             INTERLEAVE_LAST = (INTERLEAVE_LAST + 1) % NODE_CNT;
@@ -487,6 +504,7 @@ pub fn alloc_interleave() -> Option<u64> {
     }
 }
 
+/// 内部取帧(调用方须已持有 NODES_LOCK)。
 fn pop(n: usize) -> Option<u64> {
     unsafe {
         let head = NODES[n].free_head;
@@ -501,7 +519,7 @@ fn pop(n: usize) -> Option<u64> {
     }
 }
 
-/// 按节点 usable 区间精确查所属节点(支持不连续内存)。
+/// 按节点 usable 区间精确查所属节点(支持不连续内存)。不在任何节点区间时返回 0。
 pub fn node_of(phys: u64) -> usize {
     unsafe {
         for i in 0..NODE_CNT {
@@ -516,18 +534,29 @@ pub fn node_of(phys: u64) -> usize {
     }
 }
 
-/// 释放一帧(归还到所属节点)。
+/// 释放一帧(归还到所属节点)。地址不在任何节点区间(低 1MiB/内核镜像/越界)时拒绝。
 pub fn free(phys: u64) {
+    if phys == 0 {
+        return;
+    }
+    NODES_LOCK.lock();
     unsafe {
-        if phys == 0 {
+        let n = node_of(phys);
+        let covered = (0..NODES[n].span_cnt).any(|s| {
+            let (a, b) = NODES[n].spans[s];
+            phys >= a && phys < b
+        });
+        if !covered {
+            crate::log!("numa: free({phys:#x}) outside node spans, rejected");
+            NODES_LOCK.unlock();
             return;
         }
-        let n = node_of(phys);
         let head = NODES[n].free_head;
         (phys as *mut u64).write_volatile(head);
         NODES[n].free_head = phys;
         NODES[n].free_cnt += 1;
     }
+    NODES_LOCK.unlock();
 }
 
 pub fn node_count() -> usize {
@@ -580,8 +609,8 @@ pub fn node_lapics(node: usize, out: &mut [u32; 64]) -> usize {
     }
 }
 
-/// 启动自检:验证本地分配归属、跨节点 fallback 计数与交错分布。
-/// 在 SMP 唤醒后调用(BSP 单线程,AP 不触碰分配器)。
+/// 启动自检:验证本地分配归属、跨节点 fallback 计数、交错分布与非法释放拒绝。
+/// 在 SMP 唤醒后调用;帧链操作已有自旋锁保护,AP 亦可安全分配。
 pub fn selftest() {
     unsafe {
         let nn = NODE_CNT;
@@ -618,6 +647,27 @@ pub fn selftest() {
                 }
             }
         }
+        // 4. 非法释放必须被拒绝:低 1MiB / 内核镜像 / 越界地址
+        let before = node_free_total();
+        for bad in [0x7000u64, 0x100000, 0x295000, 0x100000_000000] {
+            free(bad);
+        }
+        let after = node_free_total();
+        if after == before {
+            crate::log!("numa:   invalid free rejected OK");
+        } else {
+            crate::log!("numa:   invalid free NOT rejected (BUG)");
+        }
         crate::log!("numa: selftest done");
+    }
+}
+
+fn node_free_total() -> u64 {
+    unsafe {
+        let mut t = 0;
+        for n in 0..NODE_CNT {
+            t += NODES[n].free_cnt;
+        }
+        t
     }
 }

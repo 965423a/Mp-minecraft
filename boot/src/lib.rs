@@ -11,6 +11,7 @@ mod acpi;
 mod fs;
 mod numa;
 mod smp;
+mod spinlock;
 
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;

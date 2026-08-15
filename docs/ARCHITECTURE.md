@@ -80,6 +80,10 @@ iso/
 
 - `init(info) -> node_cnt`:扫描 multiboot2 mmap 的 usable 区间,排除低 1MiB
   (实模式 IVT/BDA/EBDA/multiboot info/trampoline 区)与内核镜像,按节点串帧链。
+- **并发安全**:帧链分配/释放全程持自旋锁(`NODES_LOCK`),BSP 与 AP 可安全并发;
+  内核现为无抢占轮询式,锁内无须关中断。
+- **非法释放校验**:`free()` 的地址必须落在某节点 usable 区间,否则拒绝并告警
+  (防低 1MiB/内核镜像/越界地址静默挂链毁链)。
 - `alloc_local(node) -> Option<u64>`:本地节点优先,耗尽按距离就近 fallback。
 - `alloc_interleave() -> Option<u64>`:跨节点轮转(interleave 策略)。
 - `alloc() / free(phys) / node_of(phys)`、`node_mem(node) -> (MiB, free)`、
