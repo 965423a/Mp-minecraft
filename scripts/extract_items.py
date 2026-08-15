@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""从 minecraft-data(pc/26.1)items.json 提取物品注册表 ID。
-
-生成 items_pack.bin:
-  [u32 magic 0x49544D53 "ITMS"] [u32 version=1]
-  [u32 item_count]
-  每 item: [u32 item_id][u16 namelen][name utf8]
-"""
+"""从 minecraft-data(pc/26.1)items.json 生成 items_pack.bin(物品注册表 ID 表)。"""
 import json, os, struct, sys, urllib.request
 
 SRC_URL = "https://raw.githubusercontent.com/PrismarineJS/minecraft-data/master/data/pc/26.1/items.json"

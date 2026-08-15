@@ -30,11 +30,6 @@ CHARS = {
     38: "P",
 }
 
-COLORS = {
-    2: 32, 3: 33, 4: 33, 7: 90, 9: 34, 12: 33, 13: 90,
-    17: 91, 18: 32, 80: 37, 79: 36, 82: 33,
-}
-
 
 def load_chunks(path):
     with open(path, "rb") as f:
@@ -134,8 +129,6 @@ def iso_check(path):
         data = f.read()
     def u32(o):
         return struct.unpack_from("<I", data, o)[0]
-    def u16(o):
-        return struct.unpack_from("<H", data, o)[0]
     pvd = 16 * 2048
     if data[pvd + 1:pvd + 6] != b"CD001":
         print("not an ISO9660 image"); return 1

@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""从常用字拼音表生成内核输入法码表 pinyin_pack.bin。
-格式: u16 LE 条目数;每项 = pinyin_len(u8) + pinyin + n_chars(u8) + n_chars * u16 LE(GB 两字节)。
-"""
+"""从常用字拼音表生成内核输入法码表 pinyin_pack.bin(每项 = pinyin_len + pinyin + n_chars + n_chars*u16 GB 码)。"""
 import struct, sys
 
 # (拼音, 汉字串) 常用字表(多音字取常用读音)

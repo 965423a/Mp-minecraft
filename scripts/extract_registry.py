@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
-"""从 26.1.2 client jar 提取注册表 JSON,打包为 registry_pack.bin(zlib)。
-
-格式:
-  [u32 magic 0x4D524547 "MREG"] [u32 version=1]
-  [u32 count]
-  每项: [u16 namelen][name utf8][u32 datalen][data zlib-compressed json]
-"""
-import json, sys, zipfile, zlib, struct
+"""从 26.1.2 client jar 提取注册表 JSON,打包为 registry_pack.bin(zlib 压缩)。"""
+import sys, zipfile, zlib, struct
 
 JAR = "/tmp/client-26.1.2.jar"
 OUT = "server/crates/mc-server/registry_pack.bin"
