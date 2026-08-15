@@ -252,6 +252,7 @@ pub fn madt_parse() -> Option<(u64, [u32; 64], usize)> {
             p += elen;
         }
         if n == 0 {
+            crate::log!("acpi: madt_parse: no processor entries (len={len})");
             return None;
         }
         Some((lapic_addr, ids, n))

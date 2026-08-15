@@ -176,10 +176,11 @@ fn for_each_usable(info: *const u8, mut f: impl FnMut(u64, u64)) {
 }
 
 /// 内核镜像区间,分配时排除。
+/// 注意:镜像从 1M 加载(multiboot2),`_start` 符号只是代码入口,不是镜像起点。
 fn kernel_range() -> (u64, u64) {
     unsafe {
         (
-            &_start as *const u8 as u64,
+            1u64 << 20,
             &_end as *const u8 as u64,
         )
     }

@@ -135,6 +135,7 @@ stack_top:
 
 .section .data
 .align 8
+.global gdt_desc
 gdt:
     .quad 0x0000000000000000  /* null */
     .quad 0x00CF9A000000FFFF  /* 0x08 32-bit code */

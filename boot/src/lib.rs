@@ -10,6 +10,7 @@
 mod acpi;
 mod fs;
 mod numa;
+mod smp;
 
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
@@ -1399,6 +1400,7 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     font_init();
     fs::init();
     numa::init(mb2_info);
+    smp::init();
     unsafe {
         CWD = 0;
         SERVER_RUNNING = false;
