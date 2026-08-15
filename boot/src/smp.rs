@@ -6,9 +6,10 @@ use core::arch::asm;
 const TRAMP_DST: u64 = 0x7000;
 const ICR: u64 = 0x300;
 const AP_STACK_SIZE: usize = 16384;
-// tramp.S 内偏移(tramp_start 起,hexdump 校准):
-const PMODE_OFF: u64 = 0x3F; // pmode_entry
-const LONG_OFF: u64 = 0x68; // long_entry
+// tramp.S 内偏移(tramp_start 起,编译后 xxd 校准):
+const PARAM_OFF: u64 = 0xC0; // 参数区起点
+const PMODE_OFF: u64 = 0x2B; // pmode_entry(编译后校准)
+const LONG_OFF: u64 = 0x6A; // long_entry(编译后校准)
 
 unsafe extern "C" {
     static tramp_start: u8;
@@ -105,30 +106,56 @@ fn wait_icr_ready(apic_base: u64) {
     }
 }
 
-/// 给 0x7000 的 trampoline 参数区打补丁。
-unsafe fn patch_tramp(gdt: u64, cr3v: u64, stack: u64, ready: u64, apid: u32) {
+/// 屏蔽 IOAPIC 全部 redirection 项(mask bit 16),停掉 PIT 等经 IOAPIC 的中断。
+unsafe fn mask_ioapic() {
+    let io = 0xFEC0_0000u64 as *mut u32;
+    for i in 0..24 {
+        io.add(0).write_volatile(0x10 + 2 * i);
+        io.add(0x10 / 4).write_volatile(0x0001_0000); // mask + vector 0
+        io.add(0).write_volatile(0x11 + 2 * i);
+        io.add(0x10 / 4).write_volatile(0); // dest = 0
+    }
+}
+
+/// 给 0x7000 的 trampoline 参数区(偏移 PARAM_OFF 起)打补丁。
+unsafe fn patch_tramp(gdt_limit: u32, gdt_base: u64, cr3v: u64, stack: u64, ready: u64, apid: u32) {
     let p = TRAMP_DST as *mut u8;
-    (p.add(0x00) as *mut u32).write_volatile((23u32 << 16) | (gdt & 0xFFFF) as u32);
-    (p.add(0x04) as *mut u32).write_volatile((gdt >> 16) as u32);
-    (p.add(0x08) as *mut u32).write_volatile(cr3v as u32);
-    (p.add(0x0C) as *mut u32).write_volatile(stack as u32);
-    (p.add(0x10) as *mut u32).write_volatile(ready as u32);
-    (p.add(0x14) as *mut u32).write_volatile(apid);
+    (p.add(PARAM_OFF as usize + 0x00) as *mut u16).write_volatile(gdt_limit as u16); // GDT limit
+    (p.add(PARAM_OFF as usize + 0x02) as *mut u32).write_volatile(gdt_base as u32); // base lo
+    (p.add(PARAM_OFF as usize + 0x06) as *mut u16).write_volatile((gdt_base >> 32) as u16); // base hi
+    (p.add(PARAM_OFF as usize + 0x08) as *mut u32).write_volatile(cr3v as u32);
+    (p.add(PARAM_OFF as usize + 0x0C) as *mut u32).write_volatile(stack as u32);
+    (p.add(PARAM_OFF as usize + 0x10) as *mut u32).write_volatile(ready as u32);
+    (p.add(PARAM_OFF as usize + 0x14) as *mut u32).write_volatile(apid);
 }
 
 unsafe fn wake_ap(apic_base: u64, id: u32, idx: usize, tpu: u64) -> bool {
-    // INIT(level 触发)
-    apic_write(apic_base, ICR, (id << 24) | 0x000C0500);
+    crate::log!(
+        "smp: icr0={:#x} icr2={:#x}",
+        apic_read(apic_base, 0x300),
+        apic_read(apic_base, 0x310)
+    );
+    // 先写 ICR2(dest field),再写 ICR(低 32)触发投递
+    apic_write(apic_base, 0x310, id << 24);
+    // INIT assert(level+assert)+ deassert
+    apic_write(apic_base, ICR, 0x0000C500);
     wait_icr_ready(apic_base);
     usleep(10_000, tpu);
-    // SIPI(vector 7 -> 0x7000),两次
-    apic_write(apic_base, ICR, (id << 24) | 0x00060407);
+    apic_write(apic_base, 0x310, id << 24);
+    apic_write(apic_base, ICR, 0x00008500);
     wait_icr_ready(apic_base);
-    usleep(200, tpu);
-    apic_write(apic_base, ICR, (id << 24) | 0x00060407);
+    usleep(10_000, tpu); // 等 AP 完成 INIT 重置再发 SIPI,防竞态丢 SIPI
+    // SIPI(vector 7 -> 0x7000),两次。delivery mode 必须 = 0b110(Start-Up),
+    // 0x607 的 mode=0b000(Fixed)无效,AP 不会启动
+    apic_write(apic_base, 0x310, id << 24);
+    apic_write(apic_base, ICR, 0x00000607);
     wait_icr_ready(apic_base);
-    // 轮询就绪,最多 ~100ms
-    for _ in 0..1000 {
+    usleep(1_000, tpu);
+    apic_write(apic_base, 0x310, id << 24);
+    apic_write(apic_base, ICR, 0x00000607);
+    wait_icr_ready(apic_base);
+    // 轮询就绪,最多 ~5s
+    for _ in 0..50_000 {
         if AP_READY[idx] != 0 {
             return true;
         }
@@ -145,6 +172,14 @@ pub fn init() -> usize {
             return 1;
         };
         let bsp = crate::acpi::lapic_id();
+        crate::log!(
+            "smp: bsp={bsp:#x}, madt ids={:#x},{:#x},{:#x},{:#x} n={}",
+            ids[0],
+            ids[1],
+            ids[2],
+            ids[3],
+            n
+        );
         let tpu = tsc_per_us();
         // 复制 trampoline 到低内存
         let sz = &tramp_end as *const u8 as usize - &tramp_start as *const u8 as usize;
@@ -159,13 +194,34 @@ pub fn init() -> usize {
         // 打补丁:跳转目标 = 0x7000 + tramp 内偏移
         let pmode_off = PMODE_OFF;
         let long_off = LONG_OFF;
-        *((TRAMP_DST + 0x18) as *mut u16) = (0x7000 + pmode_off) as u16;
-        *((TRAMP_DST + 0x1A) as *mut u16) = 0x08;
-        *((TRAMP_DST + 0x1C) as *mut u32) = (0x7000 + long_off) as u32;
-        let gdt = &gdt_desc as *const u8 as u64;
+        *((TRAMP_DST + PARAM_OFF + 0x18) as *mut u16) = (0x7000 + pmode_off) as u16;
+        *((TRAMP_DST + PARAM_OFF + 0x1A) as *mut u16) = 0x08;
+        *((TRAMP_DST + PARAM_OFF + 0x1C) as *mut u32) = (0x7000 + long_off) as u32;
+        let gdp = &gdt_desc as *const u8;
+        let gdt_limit = (gdp as *const u16).read_volatile() as u32;
+        let gdt_base = (gdp.add(2) as *const u32).read_volatile() as u64
+            | ((gdp.add(6) as *const u16).read_volatile() as u64) << 32;
         let cr3v = cr3_value();
+        // 屏蔽 8259 全部 IRQ(PIT 等),否则 QEMU 会把 IRQ0 以 INT=0x08 持续投递,
+        // 干扰 wait-for-SIPI 状态的 AP(错过 SIPI)
+        outb(0x21, 0xFF);
+        outb(0xA1, 0xFF);
+        mask_ioapic(); // QEMU 的 PIT(IRQ0)经 IOAPIC 以 INT=0x08 投递,8259 mask 挡不住
+        crate::log!(
+            "smp: imr0={:#x} imr1={:#x} lvt0={:#x} lvt1={:#x}",
+            inb(0x21),
+            inb(0xA1),
+            apic_read(apic_base, 0x350),
+            apic_read(apic_base, 0x360)
+        );
+        // 启用本核 LAPIC(SVR),屏蔽 LVT0/LVT1,避免 QEMU 把 PIT 中断以 NMI 形式注入
+        (apic_base as *mut u32).add(0xF0 / 4).write_volatile(0x1FF);
+        (apic_base as *mut u32).add(0x350 / 4).write_volatile(0x10000);
+        (apic_base as *mut u32).add(0x360 / 4).write_volatile(0x10000);
         let mut online = 1usize;
         let mut ap = 0usize;
+        // AP 冷启动(进入 wait-for-SIPI)比 BSP 慢,过早发 INIT/SIPI 会丢,先等它就绪
+        usleep(500_000, tpu);
         for i in 0..n {
             let id = ids[i];
             if id == bsp {
@@ -175,7 +231,7 @@ pub fn init() -> usize {
                 (&AP_STACKS[ap] as *const u8 as u64) + AP_STACKS[ap].len() as u64;
             let ready = &AP_READY[ap] as *const u32 as u64;
             AP_READY[ap] = 0;
-            patch_tramp(gdt, cr3v, stack, ready, ap as u32);
+            patch_tramp(gdt_limit, gdt_base, cr3v, stack, ready, ap as u32);
             crate::log!("smp: waking lapic {:#x}, stack {:#x}", id, stack);
             if wake_ap(apic_base, id, ap, tpu) {
                 let node = crate::numa::node_for_lapic(id).unwrap_or(0);
