@@ -4,6 +4,12 @@
 .section .text
 .p2align 4
 
+/* 调度器切栈:rdi = 目标栈顶(帧首),换栈后从 common_resume 恢复。 */
+.global sched_switch_asm
+sched_switch_asm:
+    movq %rdi, %rsp
+    jmp common_resume
+
 .macro STUB n
 stub_\n:
     .if \n == 10 || \n == 11 || \n == 12 || \n == 13 || \n == 14 || \n == 17
@@ -44,6 +50,8 @@ common_intr:
     pushq %r15
     movq %rsp, %rdi
     call int_handler
+common_resume:
+    .global common_resume
     popq %r15
     popq %r14
     popq %r13

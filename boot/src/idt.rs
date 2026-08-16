@@ -147,7 +147,8 @@ pub extern "C" fn int_handler(f: *mut Frame) {
     if fr.vec == TICK_VEC as u64 {
         let id = lapic_id() as usize;
         TICKS[id].fetch_add(1, Ordering::Relaxed);
-        apic_w(EOI, 0);
+        apic_w(EOI, 0); // 先 EOI:on_tick 可能切栈不再返回
+        crate::sched::on_tick(f);
         return;
     }
     if fr.vec == SPURIOUS_VEC as u64 {
