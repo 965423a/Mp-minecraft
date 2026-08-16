@@ -254,6 +254,89 @@ pub fn madt_parse() -> Option<(u64, [u32; 64], usize)> {
     }
 }
 
+/// 解析 MADT 中的 IOAPIC 列表,最多 8 个(双路 X99 为 2 个)。
+/// 返回 (MMIO 地址, GSIV 基址, 引脚数)。
+pub fn madt_ioapics() -> [(u64, u32, u32); 8] {
+    let mut out = [(0u64, 0u32, 0u32); 8];
+    let mut n = 0;
+    unsafe {
+        let Some(thdr) = find_table(MADT_SIG) else {
+            return out;
+        };
+        let tbase = thdr as u64;
+        let len = (*thdr).length as u64;
+        let mut p = 44u64;
+        while p + 2 <= len {
+            let e = (tbase + p) as *const u8;
+            let typ = e.read_volatile();
+            let elen = e.add(1).read_volatile() as u64;
+            if elen < 2 || p + elen > len {
+                break;
+            }
+            if typ == 1 && elen >= 12 && n < 8 {
+                let mut b = [0u8; 4];
+                for i in 0..4 {
+                    b[i] = e.add(4 + i).read_volatile();
+                }
+                let addr = u32::from_le_bytes(b) as u64;
+                for i in 0..4 {
+                    b[i] = e.add(8 + i).read_volatile();
+                }
+                let gsiv = u32::from_le_bytes(b);
+                out[n] = (addr, gsiv, ioapic_pins(addr));
+                n += 1;
+            }
+            p += elen;
+        }
+    }
+    out
+}
+
+/// 读 IOAPIC 版本寄存器得到引脚数:((ver >> 16) & 0xFF) + 1。
+fn ioapic_pins(addr: u64) -> u32 {
+    unsafe {
+        core::ptr::write_volatile(addr as *mut u32, 1); // IOREGSEL: VER
+        let ver = core::ptr::read_volatile((addr + 0x10) as *const u32);
+        ((ver >> 16) & 0xFF) + 1
+    }
+}
+
+/// 查中断源覆盖(IRQ -> GSIV):无覆盖时 GSIV == IRQ。
+/// 返回 (GSIV, flags 低 16 位:polarity/trigger)。
+pub fn madt_irq_override(src: u32) -> (u32, u16) {
+    unsafe {
+        let Some(thdr) = find_table(MADT_SIG) else {
+            return (src, 0);
+        };
+        let tbase = thdr as u64;
+        let len = (*thdr).length as u64;
+        let mut p = 44u64;
+        while p + 2 <= len {
+            let e = (tbase + p) as *const u8;
+            let typ = e.read_volatile();
+            let elen = e.add(1).read_volatile() as u64;
+            if elen < 2 || p + elen > len {
+                break;
+            }
+            if typ == 2 && elen >= 10 {
+                let irq = e.add(3).read_volatile() as u32;
+                if irq == src {
+                    let mut b = [0u8; 4];
+                    for i in 0..4 {
+                        b[i] = e.add(4 + i).read_volatile();
+                    }
+                    let gsiv = u32::from_le_bytes(b);
+                    let flags = (e.add(8).read_volatile() as u16)
+                        | ((e.add(9).read_volatile() as u16) << 8);
+                    return (gsiv, flags);
+                }
+            }
+            p += elen;
+        }
+    }
+    (src, 0)
+}
+
 /// 当前 CPU 的 APIC ID(cpuid leaf 1 EBX[31:24])。
 pub fn lapic_id() -> u32 {
     let ebx: u32;

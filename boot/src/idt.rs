@@ -119,7 +119,7 @@ pub fn ticks(cpu: usize) -> u64 {
     TICKS[cpu].load(Ordering::Relaxed)
 }
 
-fn dump(fr: &Frame) -> ! {
+fn dump(fr: &Frame) {
     unsafe {
         crate::kerr(0x10, b"unhandled interrupt\0".as_ptr(), fr.vec, fr.err, fr.rip);
     }
@@ -136,11 +136,29 @@ fn dump(fr: &Frame) -> ! {
         fr.ss,
         apic_r(TMR_LVT)
     );
-    loop {
-        unsafe {
-            asm!("cli");
-            asm!("hlt");
-        }
+    unsafe {
+        let base = fr.rsp as *const u64;
+        crate::log!(
+            "intr: iret-frame: rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x}",
+            base.read_volatile(),
+            base.add(1).read_volatile(),
+            base.add(2).read_volatile(),
+            base.add(3).read_volatile(),
+            base.add(4).read_volatile()
+        );
+    }
+    unsafe {
+        asm!("cli");
+    }
+}
+
+pub type IrqHandler = unsafe extern "C" fn(*mut Frame);
+static mut HANDLERS: [Option<IrqHandler>; 256] = [const { None }; 256];
+
+/// 注册向量处理函数(非 tick/spurious 中断分发)。
+pub fn irq_register(vec: u32, h: IrqHandler) {
+    unsafe {
+        HANDLERS[vec as usize] = Some(h);
     }
 }
 
@@ -155,6 +173,11 @@ pub extern "C" fn int_handler(f: *mut Frame) {
         return;
     }
     if fr.vec == SPURIOUS_VEC as u64 {
+        apic_w(EOI, 0);
+        return;
+    }
+    if let Some(h) = unsafe { HANDLERS[fr.vec as usize] } {
+        unsafe { h(f) };
         apic_w(EOI, 0);
         return;
     }

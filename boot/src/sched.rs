@@ -13,6 +13,7 @@ pub const STACK_PAGES: usize = 4;
 pub const QUANTUM: u32 = 10; // 10 个 tick = 10ms
 
 const IDLE: u32 = 0xFFFF;
+const IDLE_TAG: u32 = 0x8000; // 队列中空闲核标记:IDLE_TAG | cpu
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -150,7 +151,8 @@ pub fn register_idle() {
 }
 
 /// tick 中断里调用:时间片用完则切栈换任务。
-/// 旧任务现场留在旧栈(on_tick 自身调用链),新任务从 common_resume 恢复。
+/// 空闲核被切走时把自己的标记(IDLE_TAG|cpu)入队尾,
+/// 队列轮转回自己的标记时恢复现场(主流程继续)。
 pub fn on_tick(fr: *mut Frame) {
     let cpu = crate::idt::lapic_id() as usize;
     if PREEMPT[cpu].load(Ordering::Relaxed) != 0 {
@@ -167,33 +169,90 @@ pub fn on_tick(fr: *mut Frame) {
             return;
         }
         t.quantum = QUANTUM;
+        t.sp = fr as u64; // 现场先写进任务表(锁内),再入队,防他核 pop 到旧帧
         unsafe { queue().push(cur) };
-        let next = unsafe { queue().pop() };
+        let mut next: Option<u32> = None;
+        let mut nsp = 0u64;
+        for _ in 0..MAX_TASKS {
+            match unsafe { queue().pop() } {
+                Some(n) if n & IDLE_TAG != 0 => {
+                    if n as usize == IDLE_TAG as usize | cpu {
+                        // 轮转回本核空闲标记:恢复主流程现场
+                        QUEUE_LOCK.unlock();
+                        let isp = IDLE_SP[cpu].load(Ordering::Relaxed);
+                        CUR[cpu].store(IDLE, Ordering::Relaxed);
+                        if isp == 0 {
+                            return;
+                        }
+                        check_frame(isp, "task-restore");
+                        sched_jump(isp);
+                    }
+                    unsafe { queue().push(n) }; // 别人的标记,放回队尾
+                }
+                Some(n) => {
+                    next = Some(n);
+                    nsp = unsafe { (*tasks().add(n as usize)).sp };
+                    break;
+                }
+                None => break,
+            }
+        }
         QUEUE_LOCK.unlock();
         match next {
             Some(n) if n == cur => return,
-            Some(n) => switch_to(cur, n, fr, cpu),
+            Some(n) => {
+                CUR[cpu].store(n, Ordering::Relaxed);
+                check_frame(nsp, "switch");
+                sched_jump(nsp);
+            }
             None => {
-                // 队列空,回 idle
+                // 队列只剩自己的标记或空,回 idle
                 CUR[cpu].store(IDLE, Ordering::Relaxed);
                 let isp = IDLE_SP[cpu].load(Ordering::Relaxed);
                 if isp == 0 {
                     return;
                 }
-                unsafe { (*tasks().add(cur as usize)).sp = fr as u64 };
+                check_frame(isp, "task-none");
                 sched_jump(isp);
             }
         }
     } else {
         // idle 被 tick 抢占:有任务就抢一个
+        let mut next: Option<u32> = None;
+        let mut nsp = 0u64;
         QUEUE_LOCK.lock();
-        let next = unsafe { queue().pop() };
-        QUEUE_LOCK.unlock();
+        for _ in 0..MAX_TASKS {
+            match unsafe { queue().pop() } {
+                Some(n) if n & IDLE_TAG != 0 => {
+                    if n as usize == IDLE_TAG as usize | cpu {
+                        // 恢复本核主流程(之前被切走)
+                        QUEUE_LOCK.unlock();
+                        let isp = IDLE_SP[cpu].load(Ordering::Relaxed);
+                        if isp == 0 {
+                            return;
+                        }
+                        check_frame(isp, "idle-restore");
+                        sched_jump(isp);
+                    }
+                    unsafe { queue().push(n) };
+                }
+                Some(n) => {
+                    next = Some(n);
+                    nsp = unsafe { (*tasks().add(n as usize)).sp };
+                    break;
+                }
+                None => break,
+            }
+        }
         if let Some(n) = next {
             IDLE_SP[cpu].store(fr as u64, Ordering::Relaxed);
             CUR[cpu].store(n, Ordering::Relaxed);
-            let sp = unsafe { (*tasks().add(n as usize)).sp };
-            sched_jump(sp);
+            unsafe { queue().push(IDLE_TAG | cpu as u32) }; // 本核标记入队(锁内)
+        }
+        QUEUE_LOCK.unlock();
+        if let Some(_n) = next {
+            check_frame(nsp, "idle->task");
+            sched_jump(nsp);
         }
     }
 }
@@ -202,16 +261,46 @@ unsafe extern "C" {
     static common_resume: [u8; 0];
 }
 
-/// 切栈:旧任务帧记在旧栈,新任务栈顶就是它的帧,直接跳到恢复序列。
-fn switch_to(cur: u32, next: u32, fr: *mut Frame, cpu: usize) -> ! {
-    unsafe { (*tasks().add(cur as usize)).sp = fr as u64 };
-    CUR[cpu].store(next, Ordering::Relaxed);
-    let sp = unsafe { (*tasks().add(next as usize)).sp };
-    sched_jump(sp);
-}
-
 unsafe extern "C" {
     static sched_switch_asm: [u8; 0];
+}
+
+/// 检查目标帧有效性:rip 为零说明帧被破坏,打印现场后停机。
+fn check_frame(sp: u64, tag: &str) {
+    unsafe {
+        let fr = sp as *const Frame;
+        let f = &*fr;
+        if f.rip == 0 {
+            let cpu = crate::idt::lapic_id() as usize;
+            crate::log!(
+                "sched: BAD FRAME {tag} sp={sp:#x} cpu{cpu} CUR={:#x} IDLE_SP={:#x} rip=0 cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} err={:#x} vec={:#x}",
+                CUR[cpu].load(Ordering::Relaxed),
+                IDLE_SP[cpu].load(Ordering::Relaxed),
+                f.cs,
+                f.rflags,
+                f.rsp,
+                f.ss,
+                f.err,
+                f.vec
+            );
+            let tasks = tasks();
+            for i in 0..MAX_TASKS {
+                let t = &*tasks.add(i);
+                if t.stack != 0 {
+                    crate::log!(
+                        "sched:   task{i}: stack={:#x} sp={:#x} q={}",
+                        t.stack,
+                        t.sp,
+                        t.quantum
+                    );
+                }
+            }
+            loop {
+                core::arch::asm!("cli");
+                core::arch::asm!("hlt");
+            }
+        }
+    }
 }
 
 /// 切栈跳转:目标栈顶即新任务的帧,换栈后从 common_resume 恢复。
