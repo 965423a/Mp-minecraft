@@ -1,5 +1,4 @@
-//! C FFI 热路径绑定 + Rust 参考实现 + 随机交叉验证。
-//! C 源码:server/native/{varint,bitpack}.c
+//! C FFI 热路径绑定 + Rust 参考实现 + 随机交叉验证;C 源码:server/native/{varint,bitpack}.c。
 
 #![no_std]
 extern crate alloc;
@@ -8,8 +7,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ffi::c_char;
 
-// ---------------- FFI 声明 ----------------
-
 unsafe extern "C" {
     fn mcs_varint_encode(value: u32, out: *mut c_char) -> usize;
     fn mcs_varint_decode(buf: *const c_char, len: usize, consumed: *mut usize) -> i64;
@@ -17,9 +14,7 @@ unsafe extern "C" {
     fn mcs_unpack_section(packed: *const u64, packed_len: usize, bits: u32, out: *mut u16);
 }
 
-// ---------------- Rust 包装 ----------------
-
-/// C 实现:VarInt 编码。返回编码字节。
+/// C 实现:VarInt 编码。
 pub fn c_encode_varint(value: u32) -> Vec<u8> {
     let mut out = [0u8; 5];
     let n = unsafe { mcs_varint_encode(value, out.as_mut_ptr() as *mut c_char) };
@@ -59,8 +54,6 @@ pub fn c_unpack_section(packed: &[u64], bits: u32) -> Vec<u16> {
     out
 }
 
-// ---------------- Rust 参考实现 ----------------
-
 /// Rust 参考:VarInt 编码。
 pub fn r_encode_varint(mut value: u32) -> Vec<u8> {
     let mut out = vec![];
@@ -90,22 +83,20 @@ pub fn r_pack_section(blocks: &[u16; 4096], bits: u32) -> Vec<u64> {
     out
 }
 
-// ---------------- 测试 ----------------
-
-/// 确定性伪随机(XorShift32),保证可复现。
-fn rng(seed: &mut u32) -> u32 {
-    let mut x = *seed;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *seed = x;
-    x
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     extern crate alloc;
+
+    /// 确定性伪随机(XorShift32),保证可复现。
+    fn rng(seed: &mut u32) -> u32 {
+        let mut x = *seed;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        *seed = x;
+        x
+    }
 
     #[test]
     fn varint_matches_reference() {

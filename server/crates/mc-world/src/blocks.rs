@@ -1,5 +1,4 @@
-//! 方块常量:全局 block state ID(原版注册表顺序,air=0, stone=1, ...)。
-//! 数值与 26.1.2 服务端 BuiltInRegistries.BLOCK 一致。
+//! 方块常量:全局 block state ID(原版注册表顺序,air=0;与 26.1.2 BuiltInRegistries.BLOCK 一致)。
 
 pub const AIR: u16 = 0;
 pub const STONE: u16 = 1;
@@ -21,7 +20,6 @@ pub const ICE: u16 = 6927;
 pub const SNOW_BLOCK: u16 = 6928;
 pub const CLAY: u16 = 6946;
 
-/// 方块名(用于日志/统计)。
 pub fn block_name(id: u16) -> &'static str {
     match id {
         AIR => "minecraft:air",

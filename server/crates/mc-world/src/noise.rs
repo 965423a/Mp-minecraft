@@ -1,7 +1,5 @@
-//! 噪声引擎:种子化的 Perlin 噪声(2D/3D)+ 分形叠加(fBm)。
-//! 全部自实现、确定性:相同种子 + 相同坐标 → 相同输出,可跨平台复现。
+//! 噪声引擎:种子化 Perlin 噪声(2D/3D)+ fBm,自实现、确定性。
 
-/// 基于种子生成 256 项置换表。
 pub struct Noise {
     perm: [u8; 512],
 }
@@ -96,7 +94,7 @@ impl Noise {
         lerp(y1, lerp(x1, x2, v), w)
     }
 
-    /// 分形叠加(fBm):多倍频 Perlin 叠加,输出约 [-1, 1],地形用。
+    /// fBm 分形叠加,输出约 [-1, 1]。
     pub fn fbm2(&self, x: f64, y: f64, octaves: usize, lacunarity: f64, gain: f64) -> f64 {
         let mut amp = 1.0;
         let mut freq = 1.0;
@@ -206,7 +204,6 @@ mod tests {
 
     #[test]
     fn no_zeros_on_bounded_region() {
-        // 确保在常见坐标范围噪声不是常数(防止退化)
         let n = Noise::new(2026);
         let mut min = f64::MAX;
         let mut max = f64::MIN;

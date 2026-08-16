@@ -1,8 +1,4 @@
-//! 简化版区域存档:一个 region 文件保存多个区块(与 MC region 类似)。
-//! 结构:魔数 "MCSR" + 版本 + 种子 + 世界类型 + 区块数
-//!      + 每区块索引条目(cx, cz, offset, length)
-//!      + 数据区(位打包 sections,空 section 只写 bits=0 + len=0)。
-//! 后续可替换为原版 region 格式。
+//! 简化 region 存档:魔数 "MCSR" + 版本 + 种子 + 世界类型 + 区块索引条目(cx, cz, offset, length) + 位打包 sections(空 section:bits=0+len=0)。
 
 use crate::chunk::{Chunk, Section, SECTIONS};
 use crate::generator::WorldType;
@@ -15,7 +11,6 @@ const VERSION: u32 = 3;
 const ENTRY_SIZE: usize = 16;
 const HEADER_SIZE: usize = 4 + 4 + 8 + 1 + 4;
 
-/// 世界存档目录(world/)下的元数据。
 pub struct RegionFile {
     #[allow(dead_code)]
     cx: i32,
@@ -23,7 +18,6 @@ pub struct RegionFile {
     cz: i32,
 }
 
-/// 读取已有 region 文件的索引条目(cx, cz, offset, length)。
 fn read_entries(buf: &[u8]) -> io::Result<Vec<(i32, i32, usize, usize)>> {
     if buf.len() < HEADER_SIZE || &buf[0..4] != MAGIC {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "bad region magic"));
@@ -49,7 +43,7 @@ fn read_entries(buf: &[u8]) -> io::Result<Vec<(i32, i32, usize, usize)>> {
     Ok(entries)
 }
 
-/// 一个 section 需要的位深:覆盖最大 state ID(全局 ID 最大约 29872,需 15 位)。
+/// 覆盖最大 state ID 所需位深(全局 ID 最大约 29872,需 15 位)。
 fn section_bits(s: &Section) -> u32 {
     let mut max = 0u16;
     for i in 0..crate::chunk::SECTION_VOLUME {
@@ -68,10 +62,9 @@ fn section_bits(s: &Section) -> u32 {
     bits
 }
 
-/// 将一个区块序列化为数据区内容。
 fn chunk_bytes(chunk: &Chunk) -> Vec<u8> {
     let mut out = Vec::with_capacity(24 * 3077);
-    for s in chunk.sections().iter() {
+    for s in chunk.sections() {
         if s.is_empty() {
             out.push(0);
             out.extend_from_slice(&0u32.to_be_bytes());
@@ -88,7 +81,6 @@ fn chunk_bytes(chunk: &Chunk) -> Vec<u8> {
     out
 }
 
-/// 从数据区反序列化区块。
 fn parse_chunk(buf: &[u8], cx: i32, cz: i32) -> io::Result<Chunk> {
     let mut chunk = Chunk::new(cx, cz);
     let mut sections = [Section::new(); SECTIONS];
@@ -196,7 +188,6 @@ impl RegionFile {
         parse_chunk(&buf[*off..end], cx, cz)
     }
 
-    /// 统计 world 目录已有区块文件数。
     pub fn count_files(world_dir: &Path) -> io::Result<usize> {
         let region_dir = world_dir.join("region");
         let mut n = 0;
@@ -265,30 +256,30 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-        let dir = std::env::temp_dir().join("mcs-region-test3");
-        let _ = fs::remove_dir_all(&dir);
-        let g = WorldGenerator::new(42, Normal);
-        let coords = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 2)];
-        let generated: Vec<_> = coords.iter().map(|&(cx, cz)| g.generate(cx, cz)).collect();
-        for c in &generated {
-            RegionFile::save(&dir, c, 42, Normal).unwrap();
-        }
-        let files = RegionFile::count_files(&dir).unwrap();
-        assert_eq!(files, 1, "同区域应只有一个文件");
-        for ((cx, cz), orig) in coords.iter().zip(generated.iter()) {
-            let c = RegionFile::load(&dir, *cx, *cz).unwrap();
-            for x in 0..16 {
-                for z in 0..16 {
-                    for y in (MIN_Y..MAX_Y).step_by(2) {
-                        assert_eq!(c.get(x, y, z), orig.get(x, y, z), "({cx},{y},{z})");
+                let dir = std::env::temp_dir().join("mcs-region-test3");
+                let _ = fs::remove_dir_all(&dir);
+                let g = WorldGenerator::new(42, Normal);
+                let coords = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 2)];
+                let generated: Vec<_> = coords.iter().map(|&(cx, cz)| g.generate(cx, cz)).collect();
+                for c in &generated {
+                    RegionFile::save(&dir, c, 42, Normal).unwrap();
+                }
+                let files = RegionFile::count_files(&dir).unwrap();
+                assert_eq!(files, 1, "同区域应只有一个文件");
+                for ((cx, cz), orig) in coords.iter().zip(generated.iter()) {
+                    let c = RegionFile::load(&dir, *cx, *cz).unwrap();
+                    for x in 0..16 {
+                        for z in 0..16 {
+                            for y in (MIN_Y..MAX_Y).step_by(2) {
+                                assert_eq!(c.get(x, y, z), orig.get(x, y, z), "({cx},{y},{z})");
+                            }
+                        }
                     }
                 }
-            }
-        }
-        RegionFile::save(&dir, &g.generate(1, 1), 42, Normal).unwrap();
-        let c = RegionFile::load(&dir, 1, 1).unwrap();
-        assert_eq!(c.get(8, 100, 8), g.generate(1, 1).get(8, 100, 8));
-        let _ = fs::remove_dir_all(&dir);
+                RegionFile::save(&dir, &g.generate(1, 1), 42, Normal).unwrap();
+                let c = RegionFile::load(&dir, 1, 1).unwrap();
+                assert_eq!(c.get(8, 100, 8), g.generate(1, 1).get(8, 100, 8));
+                let _ = fs::remove_dir_all(&dir);
             })
             .unwrap()
             .join()

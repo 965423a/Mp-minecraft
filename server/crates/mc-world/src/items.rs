@@ -1,11 +1,7 @@
 //! 物品注册表 ID 表:从 items_pack.bin(原版注册表顺序)加载。
-//! 提供 item ID → 名称 与 名称 → item ID 双向查找。
-
-use std::string::String;
 
 pub const PACK_BYTES: &[u8] = include_bytes!("../items_pack.bin");
 
-/// item ID → 物品名(如 28 → "dirt")。
 pub fn name_of(id: u32) -> Option<String> {
     let mut pos = 12;
     let count = read_u32(PACK_BYTES, 8) as usize;
@@ -21,7 +17,6 @@ pub fn name_of(id: u32) -> Option<String> {
     None
 }
 
-/// 物品名 → item ID(如 "dirt" → 28)。
 pub fn id_of(name: &str) -> Option<u32> {
     let mut pos = 12;
     let count = read_u32(PACK_BYTES, 8) as usize;

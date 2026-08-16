@@ -1,5 +1,4 @@
-//! Chunk Data 包体编码(原版 1.21.5+ 格式)。
-//! 只做发送:Chunk X/Z + Heightmaps + Data(sections)。
+//! Chunk Data 包体编码(原版 1.21.5+ 格式,只做发送:Heightmaps + Data(sections))。
 
 use crate::chunk::{Chunk, Section, SECTION_VOLUME};
 use crate::blocks::AIR;
@@ -34,11 +33,6 @@ pub fn pack_heightmap(chunk: &Chunk) -> Vec<u64> {
         out[word] |= (h as u64 & ((1u64 << HEIGHTMAP_BITS) - 1)) << offset;
     }
     out
-}
-
-/// section 内非空气块数(block count 字段)。
-fn block_count(s: &Section) -> u16 {
-    s.count_non_air() as u16
 }
 
 /// section 内流体数(water 全局 ID 86;简化:只统计 WATER)。
@@ -92,10 +86,10 @@ fn write_container(w: &mut Vec<u8>, entries: &[u16], global_ids: &[u16], entry_c
                 write_varint(w, *g as i32);
             }
             // 数据数组:索引(位数 = bits)
-            let mut packed = vec![0u64; (entry_count + (64 / bits as usize) - 1) / (64 / bits as usize)];
+            let per_long = 64 / bits as usize;
+            let mut packed = vec![0u64; (entry_count + per_long - 1) / per_long];
             for (i, e) in entries.iter().enumerate() {
                 let idx = global_ids.iter().position(|g| g == e).unwrap_or(0);
-                let per_long = 64 / bits as usize;
                 let (word, offset) = (i / per_long, (i % per_long) * bits as usize);
                 packed[word] |= (idx as u64 & ((1u64 << bits) - 1)) << offset;
             }
@@ -106,9 +100,9 @@ fn write_container(w: &mut Vec<u8>, entries: &[u16], global_ids: &[u16], entry_c
         _ => {
             // 直接:15 位全局 ID
             let bits = 15u32;
-            let mut packed = vec![0u64; (entry_count + 3) / 4];
+            let per_long = 64 / bits as usize;
+            let mut packed = vec![0u64; (entry_count + per_long - 1) / per_long];
             for (i, e) in entries.iter().enumerate() {
-                let per_long = 64 / bits as usize;
                 let (word, offset) = (i / per_long, (i % per_long) * bits as usize);
                 packed[word] |= (*e as u64 & ((1u64 << bits) - 1)) << offset;
             }
@@ -122,9 +116,9 @@ fn write_container(w: &mut Vec<u8>, entries: &[u16], global_ids: &[u16], entry_c
 /// 编码整个区块的 Data 部分(24 个 section,全部发送)。
 pub fn write_sections(chunk: &Chunk, biome_id: u16, out: &mut Vec<u8>) {
     let biome_ids = vec![biome_id];
-    for s in chunk.sections().iter() {
+    for s in chunk.sections() {
         // block count / fluid count
-        out.extend_from_slice(&block_count(s).to_be_bytes());
+        out.extend_from_slice(&(s.count_non_air() as u16).to_be_bytes());
         out.extend_from_slice(&fluid_count(s).to_be_bytes());
         // block states
         let ids = unique_ids(s);
@@ -183,9 +177,8 @@ mod tests {
     use super::*;
     use crate::blocks::{BEDROCK, DIRT, GRASS_BLOCK, STONE};
 
-    /// 解析一个 paletted container 的字节长度(用于测试跳过)。
-    fn container_len(buf: &[u8], block_count: usize, fluid_count: usize) -> usize {
-        let _ = (block_count, fluid_count);
+    /// 测试用:计算一个 section + biome container 的字节长度(用于跳过)。
+    fn container_len(buf: &[u8]) -> usize {
         // BPE
         let bits = buf[0] as u32;
         let mut pos = 1usize;
@@ -289,9 +282,7 @@ mod tests {
         // section 1(-48..-32)全空气 → count 0
         let mut pos = 0usize;
         for _ in 0..crate::chunk::SECTIONS {
-            let bc = u16::from_be_bytes([out[pos], out[pos + 1]]) as usize;
-            let fc = u16::from_be_bytes([out[pos + 2], out[pos + 3]]) as usize;
-            pos += 4 + container_len(&out[pos + 4..], bc, fc);
+            pos += 4 + container_len(&out[pos + 4..]);
         }
     }
 
@@ -303,8 +294,6 @@ mod tests {
         // 跳过 section 0 找到 section 1(全空气)
         let mut pos = 0usize;
         for si in 0..crate::chunk::SECTIONS {
-            let bc = u16::from_be_bytes([out[pos], out[pos + 1]]) as usize;
-            let fc = u16::from_be_bytes([out[pos + 2], out[pos + 3]]) as usize;
             if si == 1 {
                 // 全空气:count=0,然后 block container:BPE 0 + value air(0)
                 assert_eq!(&out[pos..pos + 2], &[0, 0], "air section block count");
@@ -313,7 +302,7 @@ mod tests {
                 assert_eq!(out[pos + 5], 0, "air palette value");
                 break;
             }
-            pos += 4 + container_len(&out[pos + 4..], bc, fc);
+            pos += 4 + container_len(&out[pos + 4..]);
         }
     }
 

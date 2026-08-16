@@ -1,11 +1,10 @@
-//! 区块模型:16×16×384 世界柱(对齐 MC 世界高度 -64..320)。
-//! 内存布局:24 个 section,每个 16×16×16 = 4096 格,索引 = x + z*16 + y*256。
+//! 区块模型:16×16×384 世界柱,24 个 section,索引 x + z*16 + y*256。
 
 pub const CHUNK_SIZE: usize = 16;
 pub const SECTION_HEIGHT: usize = 16;
 pub const SECTIONS: usize = 24; // 384 / 16
 pub const SECTION_VOLUME: usize = 4096;
-pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * SECTIONS * SECTION_HEIGHT; // 98304
+pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * SECTIONS * SECTION_HEIGHT;
 pub const MIN_Y: i32 = -64;
 pub const MAX_Y: i32 = 320;
 pub const SEA_LEVEL: i32 = 63;
@@ -41,7 +40,7 @@ impl Section {
         self.blocks[x + z * 16 + y * 256] = id;
     }
 
-    /// 是否全空(网络打包时可直接跳过)。
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.blocks.iter().all(|&b| b == AIR)
     }
@@ -73,7 +72,6 @@ impl Section {
     }
 }
 
-/// 一个区块(16×16×384)。
 #[derive(Debug, Clone)]
 pub struct Chunk {
     pub cx: i32,
@@ -95,7 +93,6 @@ impl Chunk {
         ((y - MIN_Y) / SECTION_HEIGHT as i32) as usize
     }
 
-    /// 世界坐标 (x, y, z) → 区块内局部坐标。x/z 取整到区块内。
     #[inline]
     pub fn local(x: i32, z: i32) -> (usize, usize) {
         (x.rem_euclid(16) as usize, z.rem_euclid(16) as usize)
@@ -123,7 +120,7 @@ impl Chunk {
         &self.sections
     }
 
-    /// 测试/内部用:整体替换 sections。
+    /// 测试用:整体替换 sections。
     pub fn replace_sections(&mut self, sections: [Section; SECTIONS]) {
         self.sections = sections;
     }
@@ -136,7 +133,6 @@ impl Chunk {
         self.sections.iter().filter(|s| !s.is_empty()).count()
     }
 
-    /// 统计非空气方块数(生成质量验证用)。
     pub fn block_count(&self) -> usize {
         self.sections.iter().map(|s| s.count_non_air()).sum()
     }

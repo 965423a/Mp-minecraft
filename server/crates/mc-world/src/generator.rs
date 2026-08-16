@@ -1,11 +1,9 @@
-//! 地形生成器:超平坦(superflat)与正常(normal)地形。
-//! 确定性:同种子同区块 → 完全一致的结果。
+//! 地形生成器:超平坦与正常地形(确定性:同种子同区块 → 完全一致)。
 
 use crate::blocks::*;
 use crate::chunk::{Chunk, MAX_Y, MIN_Y, SEA_LEVEL};
 use crate::noise::Noise;
 
-/// 世界类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorldType {
     Superflat,
@@ -54,7 +52,6 @@ impl WorldGenerator {
         self.seed
     }
 
-    /// 生成一个完整区块(16×16×384)。
     pub fn generate(&self, cx: i32, cz: i32) -> Chunk {
         let mut chunk = Chunk::new(cx, cz);
         match self.world_type {
@@ -64,7 +61,6 @@ impl WorldGenerator {
         chunk
     }
 
-    /// 超平坦:固定分层。
     fn fill_superflat(&self, chunk: &mut Chunk) {
         let base_x = cx0(chunk.cx);
         let base_z = cz0(chunk.cz);
@@ -83,7 +79,6 @@ impl WorldGenerator {
         }
     }
 
-    /// 正常地形:大陆/海洋 → 高度图 → 填充 + 沙滩 + 洞穴 + 树。
     fn fill_normal(&self, chunk: &mut Chunk) {
         let base_x = cx0(chunk.cx);
         let base_z = cz0(chunk.cz);
@@ -95,12 +90,11 @@ impl WorldGenerator {
                 self.fill_column(chunk, wx, wz, height);
             }
         }
-        // 洞穴通道
         self.carve_caves(chunk);
-        // 树木(仅地面部分,简单随机)
-        if self.tree_noise().noise2(base_x as f64 * 0.01, base_z as f64 * 0.01) > 0.82 {
-            let tx = 8 + (self.tree_noise().noise2(base_x as f64, base_z as f64) * 4.0) as i32;
-            let tz = 8 + (self.tree_noise().noise2(base_z as f64, base_x as f64) * 4.0) as i32;
+        let n = &self.detail;
+        if n.noise2(base_x as f64 * 0.01, base_z as f64 * 0.01) > 0.82 {
+            let tx = 8 + (n.noise2(base_x as f64, base_z as f64) * 4.0) as i32;
+            let tz = 8 + (n.noise2(base_z as f64, base_x as f64) * 4.0) as i32;
             if tx >= 0 && tx < 16 && tz >= 0 && tz < 16 {
                 let wx = base_x + tx;
                 let wz = base_z + tz;
@@ -112,38 +106,28 @@ impl WorldGenerator {
         }
     }
 
-    fn tree_noise(&self) -> &Noise {
-        &self.detail
-    }
-
-    /// 计算 (wx, wz) 处的表面高度。
     fn surface_height(&self, wx: i32, wz: i32) -> i32 {
         let (x, z) = (wx as f64, wz as f64);
-        // 大陆因子:[-1,1] 低频,决定海洋/陆地
+        // 大陆:低频,决定海洋/陆地
         let continent = self.continent.fbm2(x * 0.0015, z * 0.0015, 3, 2.0, 0.5);
-        // 山丘因子:中频
+        // 山丘:中频
         let hills = self.hills.fbm2(x * 0.008, z * 0.008, 4, 2.0, 0.5);
         // 细节:高频,让表面自然
         let detail = self.detail.fbm2(x * 0.05, z * 0.05, 2, 2.0, 0.5);
 
-        // 大陆 < -0.12 → 深海;> 0.12 → 陆地;之间为浅海/海岸
         let land_factor = (continent + 1.0) / 2.0; // [0,1]
         let base = if land_factor < 0.40 {
-            // 海洋区域:海床
             (SEA_LEVEL - 20) as f64 + continent * 12.0
         } else {
-            // 陆地:高度抬升,带山
             SEA_LEVEL as f64 + (land_factor - 0.40) * 260.0 + hills * 60.0
         };
-        let h = (base + detail * 3.0).round() as i32;
-        h.clamp(MIN_Y + 2, MAX_Y - 30)
+        ((base + detail * 3.0).round() as i32).clamp(MIN_Y + 2, MAX_Y - 30)
     }
 
     fn is_solid_surface(id: u16) -> bool {
         id == GRASS_BLOCK || id == DIRT || id == STONE || id == SAND || id == SNOW_BLOCK
     }
 
-    /// 填充一列:基岩底 + 石头 + 泥土 + 草/沙 + 水。
     fn fill_column(&self, chunk: &mut Chunk, wx: i32, wz: i32, surface: i32) {
         // 基岩:底层 1~2 层
         chunk.set(wx, MIN_Y, wz, BEDROCK);
@@ -223,16 +207,15 @@ impl WorldGenerator {
             chunk.set(wx, y0 + i, wz, OAK_LOG);
         }
         let canopy_top = y0 + trunk_h;
-for dy in 0..3 {
-                let radius: i32 = if dy == 2 { 1 } else { 2 };
+        for dy in 0..3 {
+            let radius: i32 = if dy == 2 { 1 } else { 2 };
             for dx in -radius..=radius {
                 for dz in -radius..=radius {
                     if dx == 0 && dz == 0 && dy == 0 {
                         continue; // 树干位置
                     }
                     let y = canopy_top + dy;
-                    if (dx.abs() == radius && dz.abs() == radius && dy != 0) && (dx.abs() + dz.abs() == 2 * radius)
-                    {
+                    if dx.abs() == radius && dz.abs() == radius && dy != 0 {
                         continue; // 圆角
                     }
                     if chunk.get(wx + dx, y, wz + dz) == AIR {
