@@ -142,9 +142,12 @@ impl NetworkServer {
             match stream {
                 Ok(stream) => {
                     let handler = Arc::clone(&self.handler);
-                    std::thread::spawn(move || {
-                        let _ = handler(stream);
-                    });
+                    std::thread::Builder::new()
+                        .stack_size(8 * 1024 * 1024)
+                        .spawn(move || {
+                            let _ = handler(stream);
+                        })
+                        .expect("spawn connection thread");
                 }
                 Err(e) => {
                     eprintln!("[network] accept error: {e}");
