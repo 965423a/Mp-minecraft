@@ -5,6 +5,7 @@
 
 mod acpi;
 mod fs;
+mod idt;
 mod numa;
 mod smp;
 mod spinlock;
@@ -376,14 +377,56 @@ impl Write for Com1 {
     }
 }
 
+/// 栈上格式化缓冲(日志行 ≤256B),经 C klogf 输出 COM1 + 内存环形缓冲。
+pub struct LogBuf {
+    buf: [u8; 256],
+    len: usize,
+}
+impl LogBuf {
+    pub fn new() -> Self {
+        LogBuf { buf: [0; 256], len: 0 }
+    }
+    pub fn as_cstr(&mut self) -> *const u8 {
+        self.buf[self.len] = 0;
+        self.buf.as_ptr()
+    }
+}
+impl core::fmt::Write for LogBuf {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for b in s.bytes() {
+            if self.len < self.buf.len() - 1 {
+                self.buf[self.len] = b;
+                self.len += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "klog")]
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {{
         use core::fmt::Write;
-        let _ = write!(crate::Com1, "[kernel] ");
-        let _ = write!(crate::Com1, $($arg)*);
-        let _ = writeln!(crate::Com1);
+        let mut b = crate::LogBuf::new();
+        let _ = write!(b, "[kernel] ");
+        let _ = write!(b, $($arg)*);
+        unsafe {
+            crate::klogf(2, b"%s\0".as_ptr(), b.as_cstr());
+        }
     }};
+}
+
+#[cfg(not(feature = "klog"))]
+#[macro_export]
+macro_rules! log {
+    ($($arg:tt)*) => {{}};
+}
+
+unsafe extern "C" {
+    pub fn klog_init();
+    pub fn klogf(level: i32, fmt: *const u8, ...);
+    pub fn kerr(code: i32, what: *const u8, a: u64, b: u64, c: u64);
 }
 
 // ---------------- PS/2 键盘 ----------------
@@ -1410,9 +1453,13 @@ fn setup_paging() {
 pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     setup_paging();
     com1_init();
+    unsafe {
+        klog_init();
+    }
     font_init();
     fs::init();
     numa::init(mb2_info);
+    idt::init();
     smp::init();
     numa::selftest();
     unsafe {
