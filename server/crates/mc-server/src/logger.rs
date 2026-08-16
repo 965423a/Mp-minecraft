@@ -14,7 +14,7 @@ impl Logger {
         Logger { file: Mutex::new(None) }
     }
 
-    /// 打开日志文件(追加)。与原版一致:启动时旧日志轮转为 <date>-<n>.log.gz。
+    /// 与原版一致:启动时旧日志轮转为 <date>-<n>.log.gz。
     pub fn open(&self, log_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(log_dir)?;
         let path = log_dir.join("latest.log");
@@ -27,17 +27,15 @@ impl Logger {
     }
 
     fn rotate(log_dir: &Path, latest: &Path) {
-        let date = {
-            let d = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|x| x.as_secs())
-                .unwrap_or(0);
-            let days = (d / 86400) as i64;
-            let rem = d % 86400;
-            let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-            let (y, mo, dd) = days_from_epoch(days);
-            format!("{y:04}-{mo:02}-{dd:02}-{h}-{m}-{s}")
-        };
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|x| x.as_secs())
+            .unwrap_or(0);
+        let days = (d / 86400) as i64;
+        let rem = d % 86400;
+        let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+        let (y, mo, dd) = days_from_epoch(days);
+        let date = format!("{y:04}-{mo:02}-{dd:02}-{h}-{m}-{s}");
         let mut n = 1usize;
         let mut target = log_dir.join(format!("{date}-{n}.log.gz"));
         while target.exists() {
@@ -92,7 +90,7 @@ impl Default for Logger {
 
 /// 天数 → (年, 月, 日),公历(0 = 1970-01-01)。
 fn days_from_epoch(days: i64) -> (i64, u32, u32) {
-    let mut d = days + 719468;
+    let d = days + 719468;
     let era = if d >= 0 { d } else { d - 146096 } / 146097;
     let doe = d - era * 146097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;

@@ -7,10 +7,7 @@ fn variance(items: &[usize]) -> f64 {
     let mean = items.iter().sum::<usize>() as f64 / items.len() as f64;
     items
         .iter()
-        .map(|v| {
-            let d = *v as f64 - mean;
-            d * d
-        })
+        .map(|&v| (v as f64 - mean).powi(2))
         .sum::<f64>()
         / items.len() as f64
 }

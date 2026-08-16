@@ -1,15 +1,12 @@
 //! 协议常量:目标版本 MC Java 26.1.2 / 协议 775 / data version 4790。
 
-/// 目标协议版本号(Minecraft Java 26.1.2)。
 pub const PROTOCOL_VERSION: i32 = 775;
 
-/// data version。
 pub const DATA_VERSION: i32 = 4790;
 
 /// 服务器向客户端自报的版本字符串。
 pub const VERSION_NAME: &str = "26.1.2";
 
-/// 网络状态机。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Handshake,
@@ -31,7 +28,6 @@ impl State {
     }
 }
 
-/// 握手 intent。
 pub mod intent {
     pub const STATUS: i32 = 1;
     pub const LOGIN: i32 = 2;

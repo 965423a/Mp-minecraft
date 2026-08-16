@@ -1,5 +1,4 @@
-//! 各网络状态的包编解码。
-//! 来源:minecraft.wiki「Java Edition protocol / Packets」,协议版本 775(MC 26.1.2)。
+//! 各网络状态的包编解码(协议 775,minecraft.wiki)。
 
 pub mod configuration;
 pub mod login;

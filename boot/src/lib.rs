@@ -1,8 +1,4 @@
-//! 内核主体:VGA 文本模式(内建汉字字形)+ 系统命令行 + 拼音输入法 + 服务器控制台。
-//!
-//! 汉字显示原理:VGA 文本模式有 8KB 字库 RAM(plane 2),字符码 0x80-0xFF
-//! 的 128 个字形可上传;每个汉字 16x16 拆成左/右两个 8x16 槽位显示,
-//! 因此一屏最多同时显示 64 个汉字。字形数据来自 GB2312 点阵 HZK16。
+//! 内核主体:VGA 文本模式 + HZK16 汉字字形 + 命令行 + 拼音输入法 + 服务器控制台。
 
 #![no_std]
 #![no_main]
@@ -20,7 +16,6 @@ use core::panic::PanicInfo;
 
 /// GB2312 16x16 点阵字库(区 16-87,每区 94 字,每字 32 字节)。
 static HZK16: &[u8] = include_bytes!("../data/hzk16.bin");
-/// 拼音码表:pinyin_pack.bin。
 static PINYIN_PACK: &[u8] = include_bytes!("../data/pinyin_pack.bin");
 
 // ---------------- 端口 I/O ----------------
@@ -50,7 +45,7 @@ const BLACK: u16 = 0x0000; // 黑底黑字(窗框黑条)
 
 /// 逻辑屏幕缓冲:ASCII(< 0x80)或 GB2312 码(0xA1A1 起)或 0(空)。
 static mut CELL: [u16; COLS * ROWS] = [0; COLS * ROWS];
-/// 字形槽当前内容(GB 码,调试用)。
+/// 已分配字形槽数(调试用)。
 static mut SLOT_NEXT: usize = 0;
 
 /// 写平面掩码:0x03 = plane 0+1(文本),0x04 = plane 2(字库)。
@@ -67,7 +62,6 @@ fn mm_set(bit: u8, on: bool) {
     outb(0x3C5, if on { v | bit } else { v & !bit });
 }
 
-/// 初始化字库访问:写平面掩码回文本模式。
 fn font_init() {
     set_map_mask(0x03);
 }
@@ -109,7 +103,6 @@ fn is_hanzi(c: u16) -> bool {
     c >= 0xA1A1
 }
 
-/// 写一格到文本显存。
 fn vga_write(offset: usize, ch: u16) {
     set_map_mask(0x03);
     unsafe {
@@ -156,7 +149,6 @@ fn render_cell(pos: usize, disp_off: &mut usize) {
     *disp_off += 2;
 }
 
-/// 全屏重绘(重置字形槽分配)。
 fn render_all() {
     unsafe {
         SLOT_NEXT = 0;
@@ -167,7 +159,6 @@ fn render_all() {
     }
 }
 
-/// 清屏:逻辑缓冲 + 显存。
 fn screen_clear() {
     unsafe {
         let p = core::ptr::addr_of_mut!(CELL) as *mut u16;
@@ -244,7 +235,7 @@ impl Vga {
         unsafe {
             CELL[pos] = ch;
         }
-        let mut off = self.row * COLS + self.col;
+        let mut off = pos;
         render_cell(pos, &mut off);
         self.col += if is_hanzi(ch) { 2 } else { 1 };
         if self.col >= COLS {
@@ -261,7 +252,7 @@ impl Vga {
             unsafe {
                 CELL[pos] = 0;
             }
-            let mut off = self.row * COLS + self.col;
+            let mut off = pos;
             render_cell(pos, &mut off);
         }
     }
@@ -273,7 +264,7 @@ impl Vga {
             unsafe {
                 CELL[pos] = 0;
             }
-            let mut off = self.row * COLS + self.col;
+            let mut off = pos;
             render_cell(pos, &mut off);
         }
     }
@@ -397,7 +388,7 @@ macro_rules! log {
 
 // ---------------- PS/2 键盘 ----------------
 
-/// 轮询读键盘扫描码(0x60)。无按键时返回 None。
+/// 轮询读键盘扫描码(0x60)。
 fn poll_scancode() -> Option<u8> {
     unsafe {
         let status: u8;
@@ -546,7 +537,6 @@ fn candidates_render(vga: &Vga) {
     for off in base..base + COLS * 3 {
         vga_write(off, BLACK | 0x20);
     }
-    // 上黑条
     for off in base..base + COLS {
         vga_write(off, BLACK | 0x20);
     }
@@ -586,7 +576,6 @@ fn candidates_render(vga: &Vga) {
             off += 2;
         }
     }
-    // 右缘 + 下黑条
     vga_write(off, BLACK | 0x20);
     for off in (y + 2) * COLS..(y + 3) * COLS {
         vga_write(off, BLACK | 0x20);
@@ -618,7 +607,6 @@ fn ime_status(vga: &Vga) {
     }
 }
 
-/// 拼音变化后刷新候选框。
 fn ime_refresh(vga: &Vga) {
     unsafe {
         IME_CAND_N = 0;
@@ -632,14 +620,12 @@ fn ime_refresh(vga: &Vga) {
     candidates_render(vga);
 }
 
-/// 清拼音与候选。
-fn ime_clear(vga: &Vga) {
+fn ime_clear() {
     unsafe {
         IME_PY_LEN = 0;
         IME_CAND_N = 0;
     }
     candidates_clear();
-    let _ = vga;
 }
 
 /// 候选字上屏:写 GB 字节到 buf,并在屏幕上显示。
@@ -654,7 +640,7 @@ fn ime_commit(vga: &mut Vga, idx: usize, buf: &mut [u8], len: &mut usize) {
         *len += 2;
     }
     vga.put(gb);
-    ime_clear(vga);
+    ime_clear();
 }
 
 /// 读一行输入(最长 buf.len()-1 字节,汉字占 2 字节)。回车返回长度。
@@ -695,7 +681,7 @@ fn read_line(vga: &mut Vga, prompt: &str, buf: &mut [u8]) -> usize {
                 }
                 0x1C => {
                     vga.put('\n' as u16);
-                    ime_clear(vga);
+                    ime_clear();
                     return len;
                 }
                 0x01 => {
@@ -713,9 +699,7 @@ fn read_line(vga: &mut Vga, prompt: &str, buf: &mut [u8]) -> usize {
                             IME_PY_LEN -= 1;
                         }
                         ime_refresh(vga);
-                        let _ = vga; // 拼音字母已上屏,不重绘
-                        // 从屏幕删一个字母
-                        vga.backspace();
+                        vga.backspace(); // 拼音字母已上屏,不重绘
                     } else if len > 0 {
                         if len >= 2
                             && buf[len - 2] >= 0xA1
@@ -730,7 +714,6 @@ fn read_line(vga: &mut Vga, prompt: &str, buf: &mut [u8]) -> usize {
                     }
                 }
                 0x39 => {
-                    // 空格
                     if unsafe { IME_CN && IME_PY_LEN > 0 && IME_CAND_N > 0 } {
                         ime_commit(vga, 0, buf, &mut len);
                     } else if !unsafe { IME_CN } {
@@ -1102,7 +1085,6 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                 );
             }
         }
-        let _ = rest;
     }
 }
 
@@ -1299,12 +1281,8 @@ fn server_console(vga: &mut Vga) {
                 let _ = writeln!(vga, "  [server] 0 players online");
             }
             b"say" => {
-                let mut i = 0;
-                while i < rest.len() && rest[i] == b' ' {
-                    i += 1;
-                }
                 let _ = vga.write_str("  [server] ");
-                print_bytes(vga, &rest[i..]);
+                print_bytes(vga, trim_space(rest));
                 let _ = writeln!(vga, "");
             }
             b"version" => {
@@ -1464,7 +1442,6 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     // EULA 第一步
     let accepted = eula_prompt(&mut vga);
 
-    // 系统命令行
     vga.clear();
     vga.set_cursor(2, 0);
     let _ = writeln!(vga, "================================================================");

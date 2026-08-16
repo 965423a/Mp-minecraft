@@ -31,7 +31,7 @@ _start:
     /* 关中断:内核尚无 IDT,PIT 定时器中断会跳垃圾 IDT 破坏内存 */
     cli
 
-    /* 保存 multiboot2 info 指针 (ebx) 与 magic (eax) */
+    /* cpuid 会破坏 eax/ebx,先把 mb2 info 挪到 ebp */
     movl %ebx, %ebp
     movl %eax, %edi
 
@@ -110,13 +110,12 @@ _start:
 long_start:
     lgdt gdt_desc              /* 64 位 GDTR 重载:limit u16 + base u64(长模式读 10 字节) */
     movq %rbp, %rdi            /* multiboot2 info(32 位模式下 ebp 保存,零扩展为 64 位) */
-    movq %rdi, %r15            /* 保存 */
+    movq %rdi, %r15
     /* 数据段选择器 */
     movw $0x10, %ax
     movw %ax, %ds
     movw %ax, %es
     movw %ax, %ss
-    /* 栈 */
     movq $stack_top, %rsp
     movq %r15, %rdi
     call kernel_main

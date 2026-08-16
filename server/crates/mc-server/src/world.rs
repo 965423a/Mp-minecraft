@@ -1,5 +1,3 @@
-//! 世界:预生成出生点区块 + 统计。
-
 use mc_world::chunk::{MAX_Y, MIN_Y};
 use mc_world::generator::{WorldGenerator, WorldType};
 use mc_world::region::RegionFile;
@@ -13,8 +11,6 @@ pub struct WorldStats {
     pub files: usize,
 }
 
-/// 预生成出生点周围 (2r+1)² 个区块,保存到 world/region/。
-/// 多线程并行:区块之间无依赖,按 CPU 数分块生成;保存按 region 分组并行写盘。
 pub fn generate_spawn(
     world_dir: &Path,
     seed: u64,
@@ -43,9 +39,8 @@ pub fn generate_spawn(
         .min(coords.len());
 
     let chunks: Vec<mc_world::Chunk> = std::thread::scope(|s| {
-        let per = coords.len().div_ceil(threads);
         let handles: Vec<_> = coords
-            .chunks(per)
+            .chunks(coords.len().div_ceil(threads))
             .map(|part| {
                 let generator = WorldGenerator::new(seed, wtype);
                 s.spawn(move || part.iter().map(|&(cx, cz)| generator.generate(cx, cz)).collect::<Vec<_>>())

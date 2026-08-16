@@ -1,5 +1,4 @@
-//! 大端字节缓冲:协议读写的基础设施。
-//! `WriteBuf` 用于编码发送的包,`ReadBuf` 用于解码收到的包。
+//! 大端字节缓冲:WriteBuf 编码发送、ReadBuf 解码接收。
 
 use crate::varint;
 use alloc::string::String;
@@ -18,7 +17,6 @@ pub type Result<T> = core::result::Result<T, Error>;
 pub const MAX_STRING_CHARS: usize = 32767;
 pub const MAX_BYTES: usize = 2 * 1024 * 1024;
 
-/// 写入缓冲。
 #[derive(Debug, Default)]
 pub struct WriteBuf {
     pub data: Vec<u8>,
@@ -124,11 +122,9 @@ impl WriteBuf {
 
     /// VarInt 长度前缀的 byte 数组(压缩场景用)。
     pub fn write_var_bytes(&mut self, bytes: &[u8]) {
-        self.write_varint(bytes.len() as i32);
-        self.data.extend_from_slice(bytes);
+        self.write_byte_array(bytes);
     }
 
-    /// Long 数组:VarInt 长度 + 每个 VarLong。
     pub fn write_long_array(&mut self, longs: &[u64]) {
         self.write_varint(longs.len() as i32);
         for l in longs {
@@ -149,7 +145,6 @@ impl WriteBuf {
     }
 }
 
-/// 读取缓冲。
 #[derive(Debug)]
 pub struct ReadBuf<'a> {
     buf: &'a [u8],
@@ -224,7 +219,6 @@ impl<'a> ReadBuf<'a> {
         Ok(f64::from_be_bytes(self.read_bytes(8)?.try_into().unwrap()))
     }
 
-    /// Position:i64 解出 (x, y, z)。
     pub fn read_position(&mut self) -> Result<(i32, i32, i32)> {
         let v = self.read_i64()?;
         let x = (v >> 38) as i32;
@@ -250,7 +244,6 @@ impl<'a> ReadBuf<'a> {
         String::from_utf8(bytes.to_vec()).map_err(|_| Error::InvalidStringUtf8)
     }
 
-    /// 读取任意长度的原始字节切片。
     pub fn read_bytes(&mut self, n: usize) -> Result<&'a [u8]> {
         if n > MAX_BYTES {
             return Err(Error::EndOfBuffer);

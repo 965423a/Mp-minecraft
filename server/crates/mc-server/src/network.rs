@@ -10,7 +10,6 @@ use flate2::Compression;
 use mc_protocol::buf::MAX_BYTES;
 use mc_protocol::varint;
 
-/// 每个连接的读取状态:缓冲未消费的字节流,按长度前缀切分帧。
 pub struct ConnReader {
     buf: Vec<u8>,
     compression: bool,
@@ -25,7 +24,6 @@ impl ConnReader {
         self.compression = on;
     }
 
-    /// 从流读入更多字节,返回本帧(长度前缀 + 包体)。
     pub fn next_frame(&mut self, stream: &mut TcpStream) -> io::Result<Option<Vec<u8>>> {
         loop {
             if let Some(frame) = self.try_frame()? {
@@ -76,7 +74,6 @@ impl ConnReader {
         Ok(Some(out))
     }
 
-    /// 非阻塞轮询:有完整帧返回,无数据返回 None(不阻塞)。
     pub fn try_poll(&mut self, stream: &mut TcpStream) -> io::Result<Option<Vec<u8>>> {
         if let Some(frame) = self.try_frame()? {
             return Ok(Some(frame));
@@ -97,7 +94,6 @@ impl ConnReader {
     }
 }
 
-/// 发送一个包:长度前缀 + 包体(压缩模式时按压缩格式)。
 pub fn send_packet_compressed(
     stream: &mut TcpStream,
     packet: &[u8],
@@ -126,7 +122,6 @@ pub fn send_packet_compressed(
     stream.flush()
 }
 
-/// 服务器句柄。
 pub struct NetworkServer {
     pub port: u16,
     listener: TcpListener,
@@ -135,15 +130,13 @@ pub struct NetworkServer {
 
 impl NetworkServer {
     pub fn bind(port: u16, handler: impl Fn(TcpStream) + Send + Sync + 'static) -> io::Result<Self> {
-        let listener = TcpListener::bind(("0.0.0.0", port))?;
         Ok(NetworkServer {
             port,
-            listener,
+            listener: TcpListener::bind(("0.0.0.0", port))?,
             handler: Arc::new(handler),
         })
     }
 
-    /// 阻塞接受连接,每个连接一个线程。
     pub fn run(&self) -> io::Result<()> {
         for stream in self.listener.incoming() {
             match stream {

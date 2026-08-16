@@ -1,11 +1,4 @@
-//! NUMA:节点表 + 每节点空闲帧链分配器。
-//!
-//! 拓扑来源:multiboot2 命令行 `numa=<n>;<id>:<startMB>-<endMB>;...`,
-//! 例如 `numa=2;0:0-1024;1:1024-2048`(单位 MiB)。无参数时单节点,
-//! 覆盖全部 usable 内存(单 U 实体机 / 未开 NUMA 的 QEMU 即此情况)。
-//!
-//! 分配器:每节点一条空闲帧链表(空闲帧内容存 next 物理地址,零额外
-//! 内存开销),本地节点优先,耗尽可跨节点 fallback。
+//! NUMA:节点表 + 每节点空闲帧链分配器(SRAT > 命令行 > 单节点)。
 
 const MAX_NODES: usize = 8;
 const MAX_SPANS: usize = 8;
@@ -371,10 +364,9 @@ pub fn init(info: *const u8) -> usize {
             };
         }
         for_each_usable(info, |base, len| {
-            let e0 = base;
             let e1 = base + len;
             for n in 0..cnt {
-                let a = e0.max(ranges[n].start);
+                let a = base.max(ranges[n].start);
                 let b = e1.min(ranges[n].end);
                 if b > a {
                     add_span(n, a, b);
@@ -514,7 +506,7 @@ fn alloc_contig_locked(node: usize, n: usize) -> Option<u64> {
         while cur != 0 {
             let start = cur;
             let mut ok = true;
-            for k in 0..n - 1 {
+            for _ in 0..n - 1 {
                 let nxt = (cur as *const u64).read_volatile();
                 if nxt != cur + 0x1000 {
                     ok = false;

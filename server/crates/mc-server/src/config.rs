@@ -1,6 +1,5 @@
 //! 服务器配置:server.properties 解析(对齐原版属性名)。
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -34,7 +33,7 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    /// 默认配置内容(首次运行时写入,与原版 jar 生成的属性键完全一致)。
+    /// 首次运行时写入,属性键与原版 jar 生成的完全一致。
     pub const fn default_properties() -> &'static str {
         "#Minecraft server properties\n\
          enable-jmx-monitoring=false\n\
@@ -94,7 +93,6 @@ impl ServerConfig {
          max-world-size=29999984\n"
     }
 
-    /// 首次运行建立与原版 jar 布局一致的文件(eula、白名单、缓存等)。
     pub fn init_vanilla_files(root: &Path) {
         let _ = fs::create_dir_all(root);
         let eula = root.join("eula.txt");
@@ -158,7 +156,6 @@ impl ServerConfig {
                 }
             }
         }
-        // seed=0 表示随机
         if cfg.seed == 0 {
             cfg.seed = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -174,11 +171,6 @@ impl ServerConfig {
             _ => mc_world::generator::WorldType::Normal,
         }
     }
-}
-
-#[allow(dead_code)]
-pub fn _parse_bench() -> HashMap<String, String> {
-    HashMap::new()
 }
 
 #[cfg(test)]
@@ -214,7 +206,7 @@ mod tests {
         let cfg = ServerConfig::load_or_create(&dir);
         assert!(dir.join("server.properties").exists());
         assert_eq!(cfg.world_type, "minecraft\\:normal");
-        assert_ne!(cfg.seed, 0); // 随机种子
+        assert_ne!(cfg.seed, 0);
         let _ = fs::remove_dir_all(&dir);
     }
 }

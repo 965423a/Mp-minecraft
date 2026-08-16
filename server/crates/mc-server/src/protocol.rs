@@ -78,13 +78,11 @@ pub fn handle_connection(
             stream.set_nonblocking(true)?;
             let frame = reader.try_poll(&mut stream)?;
             stream.set_nonblocking(false)?;
-            match frame {
-                Some(f) => Some(f),
-                None => {
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                    continue;
-                }
-            }
+            let Some(frame) = frame else {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                continue;
+            };
+            Some(frame)
         } else {
             reader.next_frame(&mut stream)?
         };
@@ -396,7 +394,6 @@ const FACE_OFFSETS: [(i32, i32, i32); 6] = [
     (1, 0, 0),
 ];
 
-/// 手持 item id → 对应方块默认 state(非方块物品返回 None)。
 fn block_for_item(item_id: i32) -> Option<u16> {
     if item_id <= 0 {
         return None;
@@ -425,7 +422,6 @@ fn send_ack(stream: &mut TcpStream, sequence: i32, compressed: bool) -> io::Resu
     cb::write_acknowledge_player_digging(&mut p, sequence);
     send_packet_compressed(stream, &p.into_bytes(), COMPRESSION_THRESHOLD, compressed)
 }
-/// 进入 Play 后发送初始包:Join Game + Player Info + 区块 + 位置同步。
 pub fn send_play_init(
     stream: &mut TcpStream,
     conn: &mut ConnInfo,
@@ -474,7 +470,6 @@ pub fn send_play_init(
     cb::write_player_info_add(&mut p, conn.uuid, &conn.name, &[]);
     send_packet_compressed(stream, &p.into_bytes(), COMPRESSION_THRESHOLD, compressed)?;
 
-    // 区块:出生点 3x3 网格
     let spawn_chunk_x = (spawn.0.floor() as i32).div_euclid(16);
     let spawn_chunk_z = (spawn.2.floor() as i32).div_euclid(16);
     let light = mc_world::network::light_full();

@@ -1,7 +1,4 @@
-//! 内核内存文件系统:只读目录树,支撑 cd/ls/cat 等命令。
-//!
-//! 节点表 + 数据池,启动时构建(仿 Linux FHS 目录树)。
-//! 名字最长 15 字节,节点表 96 个。
+//! 内存文件系统:只读目录树(节点表 + 数据池,仿 Linux FHS)。
 
 const MAX_NODES: usize = 96;
 const DATA_POOL: usize = 8192;
@@ -107,30 +104,28 @@ pub fn init() -> usize {
     // 一级目录(FHS)
     let bin = add_dir(b"bin", root as i32);
     let boot = add_dir(b"boot", root as i32);
-    let dev = add_dir(b"dev", root as i32);
+    add_dir(b"dev", root as i32);
     let etc = add_dir(b"etc", root as i32);
     let home = add_dir(b"home", root as i32);
-    let lib = add_dir(b"lib", root as i32);
-    let media = add_dir(b"media", root as i32);
-    let mnt = add_dir(b"mnt", root as i32);
-    let opt = add_dir(b"opt", root as i32);
+    add_dir(b"lib", root as i32);
+    add_dir(b"media", root as i32);
+    add_dir(b"mnt", root as i32);
+    add_dir(b"opt", root as i32);
     let proc = add_dir(b"proc", root as i32);
-    let root_home = add_dir(b"root", root as i32);
-    let run = add_dir(b"run", root as i32);
+    add_dir(b"root", root as i32);
+    add_dir(b"run", root as i32);
     let sbin = add_dir(b"sbin", root as i32);
-    let srv = add_dir(b"srv", root as i32);
-    let sys = add_dir(b"sys", root as i32);
-    let tmp = add_dir(b"tmp", root as i32);
+    add_dir(b"srv", root as i32);
+    add_dir(b"sys", root as i32);
+    add_dir(b"tmp", root as i32);
     let usr = add_dir(b"usr", root as i32);
     let var = add_dir(b"var", root as i32);
     // 二级目录
     let grub = add_dir(b"grub", boot as i32);
     let usr_bin = add_dir(b"bin", usr as i32);
     let usr_lib = add_dir(b"lib", usr as i32);
-    let usr_sbin = add_dir(b"sbin", usr as i32);
     let usr_share = add_dir(b"share", usr as i32);
     let var_log = add_dir(b"log", var as i32);
-    let var_run = add_dir(b"run", var as i32);
     let var_lib = add_dir(b"lib", var as i32);
     let mc_lib = add_dir(b"minecraft", var_lib as i32);
     let mc_world = add_dir(b"world", mc_lib as i32);
@@ -171,7 +166,6 @@ pub fn init() -> usize {
     );
     // 用户目录
     let dev_home = add_dir(b"dev", home as i32);
-    let _ = root_home;
     add_file(
         b".mcsrc",
         dev_home as i32,
@@ -190,15 +184,6 @@ pub fn init() -> usize {
         proc as i32,
         b"BOOT_IMAGE=/boot/mcs-kernel quiet\n",
     );
-    let _ = sys;
-    let _ = dev;
-    let _ = media;
-    let _ = mnt;
-    let _ = opt;
-    let _ = run;
-    let _ = srv;
-    let _ = lib;
-    let _ = tmp;
     // usr
     add_file(
         b"mcsctl",
@@ -206,7 +191,6 @@ pub fn init() -> usize {
         b"#!/bin/sh\nexec mcs-server --config /etc/mcs.conf\n",
     );
     add_file(b"libc.so", usr_lib as i32, b"MCS libc 0.1\n");
-    let _ = usr_sbin;
     add_file(b"licenses", usr_share as i32, b"MIT + EULA\n");
     // var
     add_file(
@@ -219,7 +203,6 @@ pub fn init() -> usize {
         var_log as i32,
         b"[00:00:00] [kernel] boot complete\n",
     );
-    let _ = var_run;
     let _ = mc_lib;
     add_file(
         b"level.dat",

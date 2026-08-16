@@ -10,9 +10,9 @@ def main():
         print(f"downloading {SRC_URL}")
         urllib.request.urlretrieve(SRC_URL, "/tmp/md-items.json")
     items = json.load(open("/tmp/md-items.json"))
-    by_id = {i["id"]: i for i in items}
+    ids = {i["id"] for i in items}
     for i in range(len(items)):
-        assert i in by_id, f"item id {i} missing (registry must be dense)"
+        assert i in ids, f"item id {i} missing (registry must be dense)"
 
     out = bytearray()
     out += struct.pack("<4sII", b"ITMS", 1, len(items))

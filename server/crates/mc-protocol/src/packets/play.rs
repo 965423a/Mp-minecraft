@@ -42,7 +42,7 @@ pub mod clientbound {
         pub enforces_secure_chat: bool,
     }
 
-    /// 编码 Login(play)/Join Game (0x31)。
+    /// Login(play)/Join Game (0x31)。
     /// 注意:775 无 online_mode 字段(776+ 才有)。
     pub fn write_join_game(w: &mut WriteBuf, p: &JoinGame) {
         w.write_varint(ID_JOIN_GAME);
@@ -71,7 +71,7 @@ pub mod clientbound {
         w.write_bool(p.enforces_secure_chat);
     }
 
-    /// 编码 Synchronize Player Position (0x48)。
+    /// Synchronize Player Position (0x48)。
     #[allow(clippy::too_many_arguments)]
     pub fn write_sync_player_position(
         w: &mut WriteBuf,
@@ -99,7 +99,7 @@ pub mod clientbound {
         w.write_i32(flags);
     }
 
-    /// 编码 Keep Alive (0x2C)。
+    /// Keep Alive (0x2C)。
     pub fn write_keep_alive(w: &mut WriteBuf, id: i64) {
         w.write_varint(ID_KEEP_ALIVE);
         w.write_i64(id);
@@ -113,8 +113,8 @@ pub mod clientbound {
         w.write_uuid(uuid);
         w.write_string(name);
         w.write_varint(properties.len() as i32);
-        for (name_p, value) in properties {
-            w.write_string(name_p);
+        for (prop_name, value) in properties {
+            w.write_string(prop_name);
             w.write_string(value);
             w.write_bool(false);
         }
@@ -282,11 +282,11 @@ pub mod serverbound {
         let hand = r.read_varint()?;
         let (x, y, z) = r.read_position()?;
         let direction = r.read_varint()?;
-        let _ = r.read_f32()?;
-        let _ = r.read_f32()?;
-        let _ = r.read_f32()?;
-        let _ = r.read_bool()?;
-        let _ = r.read_bool()?;
+        r.read_f32()?;
+        r.read_f32()?;
+        r.read_f32()?;
+        r.read_bool()?;
+        r.read_bool()?;
         let sequence = r.read_varint()?;
         Ok(UseItemOn {
             hand,
@@ -314,12 +314,12 @@ pub mod serverbound {
             let added = r.read_varint()?;
             let removed = r.read_varint()?;
             for _ in 0..added {
-                let _ = r.read_varint()?;
+                r.read_varint()?;
                 let len = r.read_varint()?;
-                let _ = r.read_bytes(len as usize)?;
+                r.read_bytes(len as usize)?;
             }
             for _ in 0..removed {
-                let _ = r.read_varint()?;
+                r.read_varint()?;
             }
         }
         Ok(CreativeSlot { slot, item_id })
@@ -364,7 +364,6 @@ mod tests {
                 enforces_secure_chat: false,
             },
         );
-        // 包 ID 之后应可正常读到字段。
         let mut r = ReadBuf::new(&w.data);
         assert_eq!(r.read_varint().unwrap(), ID_JOIN_GAME);
         assert_eq!(r.read_i32().unwrap(), 1);

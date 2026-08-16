@@ -1,9 +1,4 @@
-//! ACPI 解析:RSDP 扫描 + RSDT/XSDT 表遍历,提取 SRAT(节点↔内存、
-//! LAPIC↔节点)、SLIT(节点间距离)、MADT(Local APIC 基址、处理器条目)。
-//!
-//! 内核在 BIOS 模式下扫描 EBDA 与 0xE0000-0xFFFFF 找 RSDP(ACPI 2.0
-//! 优先 XSDT,fallback RSDT)。SRAT/SLIT 仅在有 NUMA 的主板(多路)上
-//! 出现;单路/单 U 主板 QEMU 不生成 SRAT,内核自动降级为单节点。
+//! ACPI 解析:RSDP 扫描 + RSDT/XSDT 遍历,提取 SRAT/SLIT/MADT。
 
 #![allow(dead_code)]
 
@@ -116,9 +111,9 @@ fn find_table(sig: &[u8; 4]) -> Option<*const AcpiHeader> {
     None
 }
 
-/// SRAT 内存亲和条目(手工偏移解析,不直接 cast)。
 const MAX_SRAT: usize = 32;
 
+/// SRAT 亲和条目(手工偏移解析,不直接 cast)。
 pub struct SratInfo {
     pub mem_aff: [(u32, u64, u64); MAX_SRAT],
     pub mem_cnt: usize,

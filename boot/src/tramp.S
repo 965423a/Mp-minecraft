@@ -32,7 +32,7 @@ real_entry:
     shll $4, %ebx                // ebx = 0x7000 = tramp 物理基址
     movw $1, %ax
     movw %ax, 0x61E0             // stage 1
-    lgdtl PARAM(%ebx)            // GDT desc @ params
+    lgdtl PARAM(%ebx)
     movl %cr0, %eax
     orl $1, %eax
     movl %eax, %cr0

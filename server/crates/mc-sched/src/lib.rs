@@ -1,5 +1,4 @@
-//! 多路 CPU 调度原型:虚拟 NUMA 拓扑 + per-CPU 队列 + 距离感知工作窃取。
-//! 验证目标:均衡性、无空转围观、同 node 窃取优先。
+//! 多路 CPU 调度原型:虚拟 NUMA + per-CPU 队列 + 距离感知工作窃取。
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -76,10 +75,8 @@ impl Scheduler {
     }
 
     pub fn submit(&self, tasks: Vec<Task>) {
-        let cpus = self.cpus.len();
         for t in tasks {
-            let cpu = t.id % cpus;
-            self.submit_to(cpu, t);
+            self.submit_to(t.id % self.cpus.len(), t);
         }
     }
 
@@ -94,9 +91,8 @@ impl Scheduler {
         std::thread::scope(|s| {
             let handles: Vec<_> = (0..workers)
                 .map(|cpu| {
-                    let sch = self;
                     let done_total = &done_total;
-                    s.spawn(move || sch.worker(cpu, done_total))
+                    s.spawn(move || self.worker(cpu, done_total))
                 })
                 .collect();
             for h in handles {

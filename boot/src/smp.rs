@@ -1,5 +1,4 @@
-//! SMP:BSP 通过 LAPIC ICR(INIT + SIPI)唤醒 AP,
-//! AP 经低内存 trampoline(0x7000)进入 64 位并标记就绪。
+//! SMP:通过 LAPIC ICR(INIT+SIPI)经低内存 trampoline(0x7000)唤醒 AP。
 
 use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -95,8 +94,7 @@ fn tsc_per_us() -> u64 {
 }
 
 fn usleep(us: u64, tpu: u64) {
-    let t = rdtsc();
-    let end = t + tpu * us;
+    let end = rdtsc() + tpu * us;
     while rdtsc() < end {
         core::hint::spin_loop();
     }
@@ -165,8 +163,7 @@ pub extern "C" fn ap_entry(ap_id: u32) -> ! {
     loop {
         usleep(1_000, tpu);
         AP_TICKS[ap_id as usize].fetch_add(1, Ordering::Relaxed);
-        let ticks = AP_TICKS[ap_id as usize].load(Ordering::Relaxed);
-        if ticks % 512 == 0 {
+        if AP_TICKS[ap_id as usize].load(Ordering::Relaxed) % 512 == 0 {
             // 压力测试:每轮 64 次 分配+写+校验+释放,优先本节点
             let mut fails = 0u64;
             let mut rounds = 0u64;
@@ -249,7 +246,6 @@ pub fn init() -> usize {
         );
         let tpu = tsc_per_us();
         TSC_PER_US = tpu;
-        // 复制 trampoline 到低内存
         let sz = &tramp_end as *const u8 as usize - &tramp_start as *const u8 as usize;
         if sz > 0x800 {
             crate::log!("smp: trampoline too large ({sz} bytes), 1 cpu");
@@ -260,12 +256,10 @@ pub fn init() -> usize {
             *((TRAMP_DST + i as u64) as *mut u8) = *src.add(i);
         }
         // 打补丁:跳转目标 = 0x7000 + tramp 内偏移
-        let pmode_off = PMODE_OFF;
-        let long_off = LONG_OFF;
         let p = TRAMP_DST as *mut u8;
-        (p.add(PARAM_OFF as usize + P_PMODE_IP as usize) as *mut u16).write_volatile(0x7000 + pmode_off as u16);
+        (p.add(PARAM_OFF as usize + P_PMODE_IP as usize) as *mut u16).write_volatile(0x7000 + PMODE_OFF as u16);
         (p.add(PARAM_OFF as usize + P_PMODE_IP as usize + 2) as *mut u16).write_volatile(0x08);
-        (p.add(PARAM_OFF as usize + P_LONG_IP as usize) as *mut u32).write_volatile(0x7000 + long_off as u32);
+        (p.add(PARAM_OFF as usize + P_LONG_IP as usize) as *mut u32).write_volatile(0x7000 + LONG_OFF as u32);
         (p.add(PARAM_OFF as usize + P_AP_ENTRY as usize) as *mut u64).write_volatile(ap_entry as usize as u64);
         let gdp = &gdt_desc as *const u8;
         let gdt_limit = (gdp as *const u16).read_volatile() as u32;

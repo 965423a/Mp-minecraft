@@ -1,10 +1,8 @@
-//! 调度原型测试:均衡性、窃取路径、距离感知。
-
 use mc_sched::{Scheduler, Task};
 
 fn variance(items: &[usize]) -> f64 {
     let mean = items.iter().sum::<usize>() as f64 / items.len() as f64;
-    items.iter().map(|v| { let d = *v as f64 - mean; d * d }).sum::<f64>() / items.len() as f64
+    items.iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>() / items.len() as f64
 }
 
 #[test]

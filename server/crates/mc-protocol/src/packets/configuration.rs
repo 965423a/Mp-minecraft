@@ -130,7 +130,7 @@ pub mod serverbound {
     }
 
     /// Plugin Message (0x02)。
-    pub fn read_plugin_message<'a>(r: &'a mut ReadBuf<'a>) -> Result<(String, &'a [u8])> {
+    pub fn read_plugin_message<'a>(r: &mut ReadBuf<'a>) -> Result<(String, &'a [u8])> {
         let channel = r.read_string()?;
         let data = r.read_bytes(r.remaining())?;
         Ok((channel, data))

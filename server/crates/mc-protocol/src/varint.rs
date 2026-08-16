@@ -1,8 +1,5 @@
-//! VarInt / VarLong 编解码。
-
 use alloc::vec::Vec;
 
-/// 将一个 u32 编码为 VarInt 写入 `out`,返回写入字节数。
 pub fn write_varint(mut value: u32, out: &mut Vec<u8>) -> usize {
     let start = out.len();
     loop {
@@ -18,12 +15,10 @@ pub fn write_varint(mut value: u32, out: &mut Vec<u8>) -> usize {
     out.len() - start
 }
 
-/// 将 i32 编码为 VarInt。
 pub fn write_varint_i32(value: i32, out: &mut Vec<u8>) -> usize {
     write_varint(value as u32, out)
 }
 
-/// 将 u64 编码为 VarLong,返回写入字节数。
 pub fn write_varlong(mut value: u64, out: &mut Vec<u8>) -> usize {
     let start = out.len();
     loop {
@@ -39,9 +34,9 @@ pub fn write_varlong(mut value: u64, out: &mut Vec<u8>) -> usize {
     out.len() - start
 }
 
-/// 解码一个 VarInt。返回 (值, 消耗字节数),非法或截断返回 None。
+/// 解码 VarInt,非法或截断返回 None。
 pub fn decode_varint(buf: &[u8], pos: &mut usize) -> Option<u32> {
-    let mut result: u32 = 0;
+    let mut result = 0u32;
     let mut shift = 0u32;
     loop {
         let byte = *buf.get(*pos)?;
@@ -58,14 +53,12 @@ pub fn decode_varint(buf: &[u8], pos: &mut usize) -> Option<u32> {
     }
 }
 
-/// 解码一个 VarInt(i32 视角)。
 pub fn decode_varint_i32(buf: &[u8], pos: &mut usize) -> Option<i32> {
     decode_varint(buf, pos).map(|v| v as i32)
 }
 
-/// 解码一个 VarLong。返回 (值, 消耗字节数)。
 pub fn decode_varlong(buf: &[u8], pos: &mut usize) -> Option<u64> {
-    let mut result: u64 = 0;
+    let mut result = 0u64;
     let mut shift = 0u32;
     loop {
         let byte = *buf.get(*pos)?;
@@ -84,6 +77,7 @@ pub fn decode_varlong(buf: &[u8], pos: &mut usize) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     fn roundtrip_u32(v: u32) {
         let mut buf = Vec::new();

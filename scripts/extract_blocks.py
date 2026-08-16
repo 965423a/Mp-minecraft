@@ -18,12 +18,9 @@ def main():
         nb = b["name"].encode()
         out += struct.pack("<H", len(nb)) + nb
         out += struct.pack("<I", b["defaultState"])
-        states = []
+        out += struct.pack("<I", b["maxStateId"] - b["minStateId"] + 1)
         for sid in range(b["minStateId"], b["maxStateId"] + 1):
-            states.append((sid, b["name"]))
-        out += struct.pack("<I", len(states))
-        for sid, name in states:
-            sb = name.encode()
+            sb = b["name"].encode()
             out += struct.pack("<I", sid) + struct.pack("<H", len(sb)) + sb
 
     with open(OUT, "wb") as f:

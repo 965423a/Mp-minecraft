@@ -1,4 +1,4 @@
-//! 网络集成测试:真实 TCP 起服,模拟客户端完成握手 + Status 全流程。
+//! 网络集成测试:真实 TCP 起服,模拟客户端跑握手、Status、Login 与 Play。
 
 use mc_protocol::buf::{ReadBuf, WriteBuf};
 use mc_protocol::consts::PROTOCOL_VERSION;

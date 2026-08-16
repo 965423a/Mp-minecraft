@@ -24,11 +24,10 @@ pub mod clientbound {
         w.write_uuid(uuid);
         w.write_string(username);
         w.write_varint(properties.len() as i32);
-        for (prop_uuid, value) in properties {
+        for (_, value) in properties {
             w.write_string("textures");
             w.write_string(value);
             w.write_bool(false); // 无签名
-            let _ = prop_uuid;
         }
     }
 }

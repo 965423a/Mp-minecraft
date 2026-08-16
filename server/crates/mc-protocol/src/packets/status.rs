@@ -1,5 +1,3 @@
-//! Status state 包。
-
 use crate::buf::{ReadBuf, Result, WriteBuf};
 
 pub mod clientbound {

@@ -13,7 +13,6 @@ pub struct Registry {
     pub entries: Vec<RegistryEntry>,
 }
 
-/// 从嵌入的 registry_pack.bin 加载并解压全部注册表条目。
 pub fn load_registry() -> Registry {
     let raw = include_bytes!("../registry_pack.bin");
     Registry::parse(raw).expect("corrupt registry_pack.bin")
@@ -41,12 +40,9 @@ impl Registry {
             let mut dec = ZlibDecoder::new(zdata);
             let mut json = Vec::new();
             dec.read_to_end(&mut json).ok()?;
-            let nbt = match json_to_nbt_root(&json) {
-                Some(n) => n,
-                None => {
-                    eprintln!("[registry] NBT convert failed: {rn} {kn}");
-                    return None;
-                }
+            let Some(nbt) = json_to_nbt_root(&json) else {
+                eprintln!("[registry] NBT convert failed: {rn} {kn}");
+                return None;
             };
             entries.push(RegistryEntry {
                 registry: rn,
@@ -57,7 +53,6 @@ impl Registry {
         Some(Registry { entries })
     }
 
-    /// 按注册表 id 分组返回 (registry, [(key, nbt)])。
     pub fn groups(&self) -> Vec<(String, Vec<(String, Vec<u8>)>)> {
         let mut m: std::collections::BTreeMap<String, Vec<(String, Vec<u8>)>> =
             std::collections::BTreeMap::new();
@@ -128,10 +123,6 @@ fn tag_of(v: &serde_json::Value) -> u8 {
         serde_json::Value::Array(_) => 9,
         serde_json::Value::Object(_) => 10,
     }
-}
-
-fn write_value(v: &serde_json::Value, out: &mut Vec<u8>) -> Option<()> {
-    write_value_at(v, out, "")
 }
 
 fn write_value_at(v: &serde_json::Value, out: &mut Vec<u8>, path: &str) -> Option<()> {
