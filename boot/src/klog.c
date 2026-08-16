@@ -187,17 +187,20 @@ static void kputs(int level, const char *fmt, va_list ap) {
 
 void klogf(int level, const char *fmt, ...) {
     va_list ap;
+    sched_preempt_disable();
     spin_lock();
     va_start(ap, fmt);
     kputs(level, fmt, ap);
     va_end(ap);
     out_c('\n');
     spin_unlock();
+    sched_preempt_enable();
 }
 
 /* 错误根因记录:code=错误码,what=说明,a/b/c=关键值(地址/寄存器/IDT/LVT 等) */
 void kerr(int code, const char *what, unsigned long a, unsigned long b,
           unsigned long c) {
+    sched_preempt_disable();
     spin_lock();
     out_s("ERR[");
     put_hex((unsigned long)code, 0);
@@ -211,9 +214,11 @@ void kerr(int code, const char *what, unsigned long a, unsigned long b,
     put_hex(c, 0);
     out_c('\n');
     spin_unlock();
+    sched_preempt_enable();
 }
 
 void klog_dump_ring(void) {
+    sched_preempt_disable();
     spin_lock();
     while (ring.tail != ring.head) {
         char c = ring.buf[ring.tail];
@@ -221,4 +226,5 @@ void klog_dump_ring(void) {
         com1_putc(c);
     }
     spin_unlock();
+    sched_preempt_enable();
 }

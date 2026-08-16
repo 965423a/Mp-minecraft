@@ -167,6 +167,7 @@ unsafe {
         (apic as *mut u32).add(0x360 / 4).write_volatile(0x100FF); // LVT1 屏蔽(vector 0xFF)
     }
     crate::idt::local_init();
+    crate::sched::register_idle();
     crate::log!("smp: AP{ap_id} entering idle loop");
     let tpu = unsafe { TSC_PER_US };
     let lapic_id = unsafe { (apic as *mut u32).add(0x20 / 4).read_volatile() >> 24 };

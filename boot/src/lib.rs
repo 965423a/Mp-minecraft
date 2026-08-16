@@ -7,6 +7,7 @@ mod acpi;
 mod fs;
 mod idt;
 mod numa;
+mod sched;
 mod smp;
 mod spinlock;
 
@@ -1462,6 +1463,9 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     idt::init();
     smp::init();
     numa::selftest();
+    sched::register_idle();
+    let _ = sched::spawn(demo_task_a);
+    let _ = sched::spawn(demo_task_b);
     unsafe {
         CWD = 0;
         SERVER_RUNNING = false;
@@ -1501,6 +1505,28 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     let _ = writeln!(vga, "");
 
     system_shell(&mut vga, accepted);
+}
+
+fn demo_task_a() -> ! {
+    let mut n = 0u64;
+    loop {
+        log!("sched: task A round {n}");
+        n += 1;
+        for _ in 0..100_000 {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+fn demo_task_b() -> ! {
+    let mut n = 0u64;
+    loop {
+        log!("sched: task B round {n}");
+        n += 1;
+        for _ in 0..100_000 {
+            core::hint::spin_loop();
+        }
+    }
 }
 
 #[panic_handler]

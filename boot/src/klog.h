@@ -14,7 +14,10 @@ enum {
 
 void klog_init(void);
 void klogf(int level, const char *fmt, ...);
-void kerr(int code, const char *what, unsigned long a, unsigned long b, unsigned long c);
+void kerr(int code, const char *what, unsigned long a, unsigned long b,
+          unsigned long c);
 void klog_dump_ring(void);
+void sched_preempt_disable(void);
+void sched_preempt_enable(void);
 
 #endif
