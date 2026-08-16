@@ -121,21 +121,80 @@ fn wait_icr_ready(apic_base: u64) {
 /// 否则 QEMU 的 PIT(8259 IRQ0 / IOAPIC pin 2)会以 INT=0x08(8259 默认向量)投递,
 /// 与 #DF 向量 8 混淆,并被 IDT[8] 当作异常 dump。
 pub unsafe fn mask_pic_ioapic() {
-    outb(0x21, 0xFF);
-    outb(0xA1, 0xFF);
+    init_8259();
     mask_ioapic();
 }
 
-/// 屏蔽 IOAPIC 全部 redirection 项(mask bit 16,vector 0xFF 防残余投递),
-/// 停掉 PIT 等经 IOAPIC 的中断。
+/// 完整初始化 8259:主片 IRQ0-7 → 0x30-0x37,从片 IRQ8-15 → 0x38-0x3F,
+/// 然后全屏蔽。初始化同时清掉 GRUB 遗留的 pending ISR。
+unsafe fn init_8259() {
+    outb(0x20, 0x11); // ICW1: edge, cascade, ICW4
+    outb(0x21, 0x30); // ICW2: 主片基址 0x30
+    outb(0x21, 0x04); // ICW3: 从片挂 IRQ2
+    outb(0x21, 0x01); // ICW4: 8086 模式
+    outb(0x21, 0xFF); // OCW1: 全屏蔽
+    outb(0xA0, 0x11);
+    outb(0xA1, 0x38); // ICW2: 从片基址 0x38
+    outb(0xA1, 0x02); // ICW3: slave id 2
+    outb(0xA1, 0x01);
+    outb(0xA1, 0xFF);
+}
+
+/// 屏蔽全部 IOAPIC 的 redirection 项(mask bit 16,vector 0xFF 防残余投递),
+/// 覆盖双路 X99 的多个 IOAPIC;停掉 PIT 等经 IOAPIC 的中断。
 unsafe fn mask_ioapic() {
-    let io = 0xFEC0_0000u64 as *mut u32;
-    for i in 0..24 {
-        io.add(0).write_volatile(0x10 + 2 * i);
-        io.add(0x10 / 4).write_volatile(0x0001_00FF); // mask + vector 0xFF
-        io.add(0).write_volatile(0x11 + 2 * i);
-        io.add(0x10 / 4).write_volatile(0); // dest = 0
+    for (addr, gsiv, pins) in crate::acpi::madt_ioapics() {
+        if addr == 0 {
+            continue;
+        }
+        crate::log!("smp: mask ioapic @ {addr:#x} gsiv={gsiv} pins={pins}");
+        mask_ioapic_one(addr, pins);
     }
+}
+
+unsafe fn mask_ioapic_one(addr: u64, pins: u32) {
+    let sel = addr as *mut u32;
+    let win = (addr + 0x10) as *mut u32;
+    for i in 0..pins {
+        sel.write_volatile(0x10 + 2 * i); // IOREDTBL 低半
+        win.write_volatile(0x0001_00FF); // mask + vector 0xFF
+        sel.write_volatile(0x11 + 2 * i); // IOREDTBL 高半
+        win.write_volatile(0); // dest = 0
+    }
+}
+
+/// 路由单个 GSIV 到指定 LAPIC(phys 模式):清 mask,边沿触发。
+pub unsafe fn ioapic_route(gsiv: u32, vector: u32, lapic: u32) {
+    ioapic_route_trig(gsiv, vector, lapic, 0);
+}
+
+/// 路由单个 GSIV,trig 为 IOREDTBL 触发位(0=边沿, 0x8000=电平)。
+pub unsafe fn ioapic_route_trig(gsiv: u32, vector: u32, lapic: u32, trig: u32) {
+    for (addr, base, pins) in crate::acpi::madt_ioapics() {
+        if addr == 0 {
+            continue;
+        }
+        if gsiv >= base && gsiv < base + pins {
+            let idx = (gsiv - base) as u32;
+            let sel = addr as *mut u32;
+            let win = (addr + 0x10) as *mut u32;
+            sel.write_volatile(0x10 + 2 * idx);
+            win.write_volatile(vector | trig); // Fixed, phys, mask 清
+            sel.write_volatile(0x11 + 2 * idx);
+            win.write_volatile((lapic & 0xFF) << 24); // 高半:dest LAPIC
+            let lo = {
+                sel.write_volatile(0x10 + 2 * idx);
+                win.read_volatile()
+            };
+            let hi = {
+                sel.write_volatile(0x11 + 2 * idx);
+                win.read_volatile()
+            };
+            crate::log!("smp: ioapic route gsiv={gsiv} -> vec={vector:#x} lapic={lapic:#x} @ {addr:#x}+{idx} ioredtbl={hi:#010x}{lo:#010x}");
+            return;
+        }
+    }
+    crate::log!("smp: ioapic route gsiv={gsiv}: no ioapic covers it");
 }
 
 /// 给 0x7000 的 trampoline 参数区(偏移 PARAM_OFF 起)打补丁。
@@ -161,12 +220,13 @@ pub static AP_STRESS_FAILS: [core::sync::atomic::AtomicU64; 64] = [const { core:
 
 pub extern "C" fn ap_entry(ap_id: u32) -> ! {
     let apic = 0xFEE0_0000u64;
-    unsafe {
+unsafe {
         (apic as *mut u32).add(0xF0 / 4).write_volatile(0x1FF); // SVR 使能 LAPIC
         (apic as *mut u32).add(0x350 / 4).write_volatile(0x100FF); // LVT0 屏蔽(vector 0xFF)
         (apic as *mut u32).add(0x360 / 4).write_volatile(0x100FF); // LVT1 屏蔽(vector 0xFF)
     }
     crate::idt::local_init();
+    crate::sched::register_idle();
     crate::log!("smp: AP{ap_id} entering idle loop");
     let tpu = unsafe { TSC_PER_US };
     let lapic_id = unsafe { (apic as *mut u32).add(0x20 / 4).read_volatile() >> 24 };
@@ -287,6 +347,9 @@ pub fn init() -> usize {
             apic_read(apic_base, 0x350),
             apic_read(apic_base, 0x360)
         );
+        outb(0x21, 0xFF);
+        outb(0xA1, 0xFF);
+        mask_ioapic(); // QEMU 的 PIT(IRQ0)经 IOAPIC 以 INT=0x08 投递,8259 mask 挡不住
         // 启用本核 LAPIC(SVR),屏蔽 LVT0/LVT1,避免 QEMU 把 PIT 中断以 NMI 形式注入
         (apic_base as *mut u32).add(0xF0 / 4).write_volatile(0x1FF);
         (apic_base as *mut u32).add(0x350 / 4).write_volatile(0x10000);

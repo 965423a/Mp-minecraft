@@ -6,6 +6,7 @@
 mod acpi;
 mod fs;
 mod idt;
+mod kb;
 mod sched;
 mod numa;
 mod smp;
@@ -1334,7 +1335,7 @@ fn eula_prompt(vga: &mut Vga) -> bool {
     let _ = writeln!(vga, "   [N] I do not agree (reboot)");
     let _ = writeln!(vga, "");
     loop {
-        if let Some(sc) = poll_scancode() {
+        if let Some(sc) = kb::pop().or_else(poll_scancode) {
             match sc {
                 0x15 => {
                     log!("EULA accepted");
@@ -1416,6 +1417,7 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     fs::init();
     numa::init(mb2_info);
     idt::init();
+    kb::init();
     smp::init();
     numa::selftest();
     sched::register_idle();
