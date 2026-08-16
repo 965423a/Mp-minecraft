@@ -5,6 +5,7 @@
 
 mod acpi;
 mod fs;
+mod idt;
 mod numa;
 mod smp;
 mod spinlock;
@@ -1413,6 +1414,7 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     font_init();
     fs::init();
     numa::init(mb2_info);
+    idt::init();
     smp::init();
     numa::selftest();
     unsafe {

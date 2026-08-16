@@ -65,7 +65,7 @@ fn cr3_value() -> u64 {
 }
 
 /// 用 PIT 通道 0 校准 TSC 频率,返回 ticks/us。
-fn tsc_per_us() -> u64 {
+pub fn tsc_per_us() -> u64 {
     unsafe {
         // mode 2,初值 65536(~54.9ms 满周期)
         outb(0x43, 0x34);
@@ -117,12 +117,22 @@ fn wait_icr_ready(apic_base: u64) {
     }
 }
 
-/// 屏蔽 IOAPIC 全部 redirection 项(mask bit 16),停掉 PIT 等经 IOAPIC 的中断。
+/// 屏蔽 8259 + IOAPIC 全部中断源,必须在任何 sti 之前调用。
+/// 否则 QEMU 的 PIT(8259 IRQ0 / IOAPIC pin 2)会以 INT=0x08(8259 默认向量)投递,
+/// 与 #DF 向量 8 混淆,并被 IDT[8] 当作异常 dump。
+pub unsafe fn mask_pic_ioapic() {
+    outb(0x21, 0xFF);
+    outb(0xA1, 0xFF);
+    mask_ioapic();
+}
+
+/// 屏蔽 IOAPIC 全部 redirection 项(mask bit 16,vector 0xFF 防残余投递),
+/// 停掉 PIT 等经 IOAPIC 的中断。
 unsafe fn mask_ioapic() {
     let io = 0xFEC0_0000u64 as *mut u32;
     for i in 0..24 {
         io.add(0).write_volatile(0x10 + 2 * i);
-        io.add(0x10 / 4).write_volatile(0x0001_0000); // mask + vector 0
+        io.add(0x10 / 4).write_volatile(0x0001_00FF); // mask + vector 0xFF
         io.add(0).write_volatile(0x11 + 2 * i);
         io.add(0x10 / 4).write_volatile(0); // dest = 0
     }
@@ -153,9 +163,10 @@ pub extern "C" fn ap_entry(ap_id: u32) -> ! {
     let apic = 0xFEE0_0000u64;
     unsafe {
         (apic as *mut u32).add(0xF0 / 4).write_volatile(0x1FF); // SVR 使能 LAPIC
-        (apic as *mut u32).add(0x350 / 4).write_volatile(0x10000); // LVT0 屏蔽
-        (apic as *mut u32).add(0x360 / 4).write_volatile(0x10000); // LVT1 屏蔽
+        (apic as *mut u32).add(0x350 / 4).write_volatile(0x100FF); // LVT0 屏蔽(vector 0xFF)
+        (apic as *mut u32).add(0x360 / 4).write_volatile(0x100FF); // LVT1 屏蔽(vector 0xFF)
     }
+    crate::idt::local_init();
     crate::log!("smp: AP{ap_id} entering idle loop");
     let tpu = unsafe { TSC_PER_US };
     let lapic_id = unsafe { (apic as *mut u32).add(0x20 / 4).read_volatile() >> 24 };
@@ -267,10 +278,8 @@ pub fn init() -> usize {
             | ((gdp.add(6) as *const u16).read_volatile() as u64) << 32;
         let cr3v = cr3_value();
         // 屏蔽 8259 全部 IRQ(PIT 等),否则 QEMU 会把 IRQ0 以 INT=0x08 持续投递,
-        // 干扰 wait-for-SIPI 状态的 AP(错过 SIPI)
-        outb(0x21, 0xFF);
-        outb(0xA1, 0xFF);
-        mask_ioapic(); // QEMU 的 PIT(IRQ0)经 IOAPIC 以 INT=0x08 投递,8259 mask 挡不住
+        // 干扰 wait-for-SIPI 状态的 AP(错过 SIPI);此处重复执行(无副作用)
+        mask_pic_ioapic();
         crate::log!(
             "smp: imr0={:#x} imr1={:#x} lvt0={:#x} lvt1={:#x}",
             inb(0x21),
