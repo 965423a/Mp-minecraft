@@ -1236,7 +1236,7 @@ fn systemctl(vga: &mut Vga, args: &[u8]) {
     let (sub, unit) = split_ascii_word(args);
     match sub {
         b"status" => {
-            let running = unsafe { SERVER_RUNNING };
+            let (running, made) = emb::server_stats();
             let unit = trim_space(unit);
             if unit.is_empty() {
                 let _ = writeln!(vga, "  systemctl status: showing all units");
@@ -1248,6 +1248,9 @@ fn systemctl(vga: &mut Vga, args: &[u8]) {
                         core::str::from_utf8(name).unwrap_or("?"),
                         if r { "active (running)" } else { "inactive (dead)" }
                     );
+                }
+                if running {
+                    let _ = writeln!(vga, "    mc-server.service: {made} chunks generated so far");
                 }
             } else {
                 unit_status(vga, unit, running);
@@ -1270,16 +1273,19 @@ fn systemctl(vga: &mut Vga, args: &[u8]) {
                 return;
             }
             if unit_matches(unit, b"mc-server.service") {
-                if unsafe { SERVER_RUNNING } {
+                let (running, _) = emb::server_stats();
+                if running {
                     let _ = writeln!(vga, "  mc-server.service already running");
-                } else {
+                } else if emb::server_start(0xC0FFEE) {
                     unsafe {
                         SERVER_RUNNING = true;
                     }
+                    crate::log!("systemctl: mc-server.service task spawned");
                     let _ = writeln!(vga, "  starting mc-server.service ...");
-                    let _ = writeln!(vga, "  [server] loading world generator (normal terrain)");
-                    let _ = writeln!(vga, "  [server] listening on 0.0.0.0:25565");
-                    let _ = writeln!(vga, "  [server] Done. Welcome to Mp-minecraft!");
+                    let _ = writeln!(vga, "  [server] world generator task spawned (seed 0xC0FFEE)");
+                    let _ = writeln!(vga, "  [server] generating chunks, console via 'ctrls'");
+                } else {
+                    let _ = writeln!(vga, "  mc-server.service failed to start (task table full?)");
                 }
             } else if unit_matches(unit, b"console.service") {
                 let _ = writeln!(vga, "  console.service: use 'ctrls' to attach");
