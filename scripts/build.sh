@@ -19,15 +19,14 @@ cp "$ROOT/boot/target/x86_64-unknown-none/release/mcs-kernel" "$ISO_ROOT/boot/mc
 cp "$ROOT/sysroot/boot/grub/grub.cfg" "$ISO_ROOT/boot/grub/grub.cfg"
 cp "$ROOT/server/target/release/mc-server" "$ISO_ROOT/boot/mc-server" 2>/dev/null || true
 
-# UEFI 可执行文件:让 Rufus/固件能直接识别 ISO 的 UEFI 支持
-# 必须带 video/gfxterm/font,gfxpayload 才能保留 GOP framebuffer 传给内核
+# UEFI 可执行文件:用完整模块集(与 grub-mkrescue 模板/发行版 ISO 行为一致)。
+# 之前最小模块集导致 efi_gop 驱动在 Hyper-V 的 GOP 上切换模式失败
+# ("no suitable video mode found"),Ubuntu/Kali 用完整 GRUB 却能正常显示。
+EFI_MODS=$(for m in /usr/lib/grub/x86_64-efi/*.mod; do basename "$m" .mod; done | tr '\n' ' ')
 grub-mkimage -O x86_64-efi \
     -o "$ISO_ROOT/EFI/BOOT/BOOTX64.EFI" \
     -p /boot/grub \
-    iso9660 serial terminal normal configfile search search_fs_file \
-    test echo ls cat multiboot2 videoinfo \
-    video video_fb gfxterm font all_video efi_gop \
-    part_msdos part_gpt fat ext2
+    $EFI_MODS
 mkdir -p "$ISO_ROOT/boot/grub/fonts"
 cp /usr/share/grub/unicode.pf2 "$ISO_ROOT/boot/grub/fonts/unicode.pf2" 2>/dev/null || true
 
