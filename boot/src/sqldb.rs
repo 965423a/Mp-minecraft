@@ -13,7 +13,6 @@ use core::fmt::Display;
 
 /// 数据库实例:MySQL 与 MariaDB 各自独立(独立表空间/状态)。
 pub struct Db {
-    tables: Vec<Table>,
     running: bool,
     queries: u64,
 }
@@ -21,7 +20,6 @@ pub struct Db {
 impl Db {
     const fn new() -> Self {
         Db {
-            tables: Vec::new(),
             running: false,
             queries: 0,
         }
@@ -30,6 +28,35 @@ impl Db {
 
 static mut MYSQL: Db = Db::new();
 static mut MARIADB: Db = Db::new();
+/// 共享表空间:mysqld 与 mariadb 读写同一份数据(无痕切换)。
+static mut SHARED_TABLES: Vec<Table> = Vec::new();
+
+fn shared() -> &'static mut Vec<Table> {
+    unsafe { &mut *core::ptr::addr_of_mut!(SHARED_TABLES) }
+}
+
+/// 当前默认后端(0=mysql, 1=mariadb),sql 无前缀时使用。
+static mut CUR_BACKEND: u8 = 0;
+
+pub fn switch_backend(name: &str) -> bool {
+    if name.eq_ignore_ascii_case("mysql") || name.eq_ignore_ascii_case("mysqld") {
+        unsafe { CUR_BACKEND = 0 };
+        true
+    } else if name.eq_ignore_ascii_case("mariadb") {
+        unsafe { CUR_BACKEND = 1 };
+        true
+    } else {
+        false
+    }
+}
+
+pub fn current_backend() -> &'static str {
+    if unsafe { CUR_BACKEND == 1 } {
+        "mariadb"
+    } else {
+        "mysql"
+    }
+}
 
 /// MySQL 实例(mysqld.service)。
 pub fn mysql() -> &'static mut Db {
@@ -101,7 +128,8 @@ pub struct Table {
 pub fn execute(db: &mut Db, sql: &str) -> String {
     db.queries += 1;
     let mut out = String::new();
-    match Parser::new(sql, &mut out, db).parse() {
+    let store = shared();
+    match Parser::new(sql, &mut out, store).parse() {
         Ok(()) => {}
         Err(e) => {
             let _ = core::fmt::write(&mut out, format_args!("  error: {e}\n"));
@@ -114,7 +142,7 @@ struct Parser<'a> {
     s: &'a [u8],
     pos: usize,
     out: &'a mut dyn core::fmt::Write,
-    db: &'a mut Db,
+    store: &'a mut Vec<Table>,
 }
 
 #[derive(Debug)]
@@ -139,12 +167,12 @@ fn err<T>(msg: &str) -> PResult<T> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(s: &'a str, out: &'a mut dyn core::fmt::Write, db: &'a mut Db) -> Self {
+    fn new(s: &'a str, out: &'a mut dyn core::fmt::Write, store: &'a mut Vec<Table>) -> Self {
         Parser {
             s: s.as_bytes(),
             pos: 0,
             out,
-            db,
+            store,
         }
     }
 
@@ -278,10 +306,10 @@ impl<'a> Parser<'a> {
     fn parse_create(&mut self) -> PResult<()> {
         self.expect_keyword("table")?;
         let name = self.ident()?.to_ascii_lowercase();
-        if self.db.tables.iter().any(|t| t.name == name) {
+        if self.store.iter().any(|t| t.name == name) {
             return err(&format!("table '{name}' already exists"));
         }
-        if self.db.tables.len() >= MAX_TABLES {
+        if self.store.len() >= MAX_TABLES {
             return err("too many tables");
         }
         self.skip_ws();
@@ -322,7 +350,7 @@ impl<'a> Parser<'a> {
         if cols.is_empty() || cols.len() > MAX_COLS {
             return err("bad column count");
         }
-        self.db.tables.push(Table {
+        self.store.push(Table {
             name,
             cols,
             rows: Vec::new(),
@@ -334,9 +362,9 @@ impl<'a> Parser<'a> {
     fn parse_drop(&mut self) -> PResult<()> {
         self.expect_keyword("table")?;
         let name = self.ident()?.to_ascii_lowercase();
-        let before = self.db.tables.len();
-        self.db.tables.retain(|t| t.name != name);
-        if self.db.tables.len() == before {
+        let before = self.store.len();
+        self.store.retain(|t| t.name != name);
+        if self.store.len() == before {
             return err(&format!("table '{name}' not found"));
         }
         let _ = core::fmt::write(self.out, format_args!("  table dropped\n"));
@@ -345,7 +373,7 @@ impl<'a> Parser<'a> {
 
     fn parse_show(&mut self) -> PResult<()> {
         self.expect_keyword("tables")?;
-        if self.db.tables.is_empty() {
+        if self.store.is_empty() {
             let _ = core::fmt::write(self.out, format_args!("  (no tables)\n"));
             return Ok(());
         }
@@ -361,7 +389,7 @@ impl<'a> Parser<'a> {
             self.out,
             format_args!("  +-------------------------+\n"),
         );
-        for t in self.db.tables.iter() {
+        for t in self.store.iter() {
             let _ = core::fmt::write(
                 self.out,
                 format_args!("  | {:<24}| \n", t.name),
@@ -377,12 +405,12 @@ impl<'a> Parser<'a> {
     fn parse_insert(&mut self) -> PResult<()> {
         self.expect_keyword("into")?;
         let name = self.ident()?.to_ascii_lowercase();
-        let idx = match self.db.tables.iter().position(|t| t.name == name) {
+        let idx = match self.store.iter().position(|t| t.name == name) {
             Some(i) => i,
             None => return err(&format!("table '{name}' not found")),
         };
         self.expect_keyword("values")?;
-        let ncols = self.db.tables[idx].cols.len();
+        let ncols = self.store[idx].cols.len();
         loop {
             self.skip_ws();
             if self.peek() != b'(' {
@@ -407,10 +435,10 @@ impl<'a> Parser<'a> {
             if row.len() != ncols {
                 return err(&format!("expected {ncols} values, got {}", row.len()));
             }
-            if self.db.tables[idx].rows.len() >= MAX_ROWS {
+            if self.store[idx].rows.len() >= MAX_ROWS {
                 return err("table full");
             }
-            self.db.tables[idx].rows.push(row);
+            self.store[idx].rows.push(row);
             self.skip_ws();
             if self.peek() == b',' {
                 self.pos += 1;
@@ -462,7 +490,7 @@ impl<'a> Parser<'a> {
         }
         self.expect_keyword("from")?;
         let name = self.ident()?.to_ascii_lowercase();
-        let idx = match self.db.tables.iter().position(|t| t.name == name) {
+        let idx = match self.store.iter().position(|t| t.name == name) {
             Some(i) => i,
             None => return err(&format!("table '{name}' not found")),
         };
@@ -505,7 +533,7 @@ impl<'a> Parser<'a> {
         }
         self.end()?;
 
-        let t = &self.db.tables[idx];
+        let t = &self.store[idx];
         if count_all {
             let _ = core::fmt::write(self.out, format_args!("  +-------+\n"));
             let _ = core::fmt::write(self.out, format_args!("  | count |\n"));
@@ -595,7 +623,7 @@ impl<'a> Parser<'a> {
 
     fn col_index_in(&self, idx: usize, name: &str) -> PResult<usize> {
         let cname = name.to_ascii_lowercase();
-        self.db.tables[idx]
+        self.store[idx]
             .cols
             .iter()
             .position(|c| c.name == cname)
@@ -604,7 +632,7 @@ impl<'a> Parser<'a> {
 
     fn parse_update(&mut self) -> PResult<()> {
         let name = self.ident()?.to_ascii_lowercase();
-        let idx = match self.db.tables.iter().position(|t| t.name == name) {
+        let idx = match self.store.iter().position(|t| t.name == name) {
             Some(i) => i,
             None => return err(&format!("table '{name}' not found")),
         };
@@ -651,7 +679,7 @@ impl<'a> Parser<'a> {
         }
         self.end()?;
         let mut n = 0usize;
-        for row in self.db.tables[idx].rows.iter_mut() {
+        for row in self.store[idx].rows.iter_mut() {
             if let Some((ci, op, want)) = &cond {
                 if !match_val(&row[*ci], *op, want) {
                     continue;
@@ -669,7 +697,7 @@ impl<'a> Parser<'a> {
     fn parse_delete(&mut self) -> PResult<()> {
         self.expect_keyword("from")?;
         let name = self.ident()?.to_ascii_lowercase();
-        let idx = match self.db.tables.iter().position(|t| t.name == name) {
+        let idx = match self.store.iter().position(|t| t.name == name) {
             Some(i) => i,
             None => return err(&format!("table '{name}' not found")),
         };
@@ -696,8 +724,8 @@ impl<'a> Parser<'a> {
             }
         }
         self.end()?;
-        let before = self.db.tables[idx].rows.len();
-        self.db.tables[idx]
+        let before = self.store[idx].rows.len();
+        self.store[idx]
             .rows
             .retain(|row| match &cond {
                 Some((ci, op, want)) => match_val(&row[*ci], *op, want),
@@ -705,7 +733,7 @@ impl<'a> Parser<'a> {
             });
         let _ = core::fmt::write(
             self.out,
-            format_args!("  {} row(s) deleted\n", before - self.db.tables[idx].rows.len()),
+            format_args!("  {} row(s) deleted\n", before - self.store[idx].rows.len()),
         );
         Ok(())
     }
@@ -715,6 +743,7 @@ impl<'a> Parser<'a> {
 pub fn selftest(db: &mut Db) -> String {
     let mut all = String::new();
     let cases = [
+        "drop table users",
         "create table users (id int, name text, score double)",
         "insert into users values (1, 'alice', 95.5)",
         "insert into users values (2, 'bob', 87.0)",
@@ -737,13 +766,31 @@ pub fn selftest(db: &mut Db) -> String {
     all
 }
 
-/// 隔离断言:一个实例的表空间不得影响另一个。
-/// 用法:先往 mysql 建表,再确认 mariadb 为空。
-pub fn isolation_ok() -> bool {
-    let m = unsafe { &mut *core::ptr::addr_of_mut!(MYSQL) };
-    let r = unsafe { &mut *core::ptr::addr_of_mut!(MARIADB) };
-    m.tables.iter().any(|t| t.name == "isoprobe")
-        && r.tables.iter().all(|t| t.name != "isoprobe")
+/// 互通断言(无痕切换):mysqld 与 mariadb 共享同一份表空间,
+/// mysql 写入的数据必须能从 mariadb 读到。
+/// 用法:先执行 interop_probe() 写入,再调用本函数验证互通。
+pub fn interop_probe() -> String {
+    let mut out = String::new();
+    let _ = core::fmt::write(&mut out, format_args!("sql> drop table if exists isoprobe\n"));
+    out.push_str(&execute(mysql(), "drop table isoprobe"));
+    let _ = core::fmt::write(&mut out, format_args!("sql> create table isoprobe (id int, tag text)\n"));
+    out.push_str(&execute(mysql(), "create table isoprobe (id int, tag text)"));
+    let _ = core::fmt::write(&mut out, format_args!("sql> insert into isoprobe values (1, 'via-mysql')\n"));
+    out.push_str(&execute(mysql(), "insert into isoprobe values (1, 'via-mysql')"));
+    out
+}
+
+/// 互通断言:共享表空间里 isoprobe 存在且带 mysql 写入的行。
+pub fn interop_ok() -> bool {
+    let store = shared();
+    let idx = match store.iter().position(|t| t.name == "isoprobe") {
+        Some(i) => i,
+        None => return false,
+    };
+    let t = &store[idx];
+    t.rows
+        .iter()
+        .any(|r| r.iter().any(|v| matches!(v, Value::Text(x) if x == b"via-mysql")))
 }
 
 fn match_val(actual: &Value, op: u8, want: &Value) -> bool {

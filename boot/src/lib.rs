@@ -925,6 +925,156 @@ fn total_memory(info: *const u8) -> u64 {
 
 // ---------------- 命令行 ----------------
 
+
+/// 等待一个可打印键(映射 shift/忽略释放/回车返回 None=Enter)。
+fn wait_ascii(vga: &mut Vga) -> Option<u8> {
+    let mut shift = false;
+    loop {
+        if let Some(sc) = poll_scancode() {
+            if sc & 0x80 != 0 {
+                if sc == 0xAA || sc == 0xB6 {
+                    shift = false;
+                }
+                continue;
+            }
+            let c = if shift { KEY_SHIFT[sc as usize] } else { KEY_NORMAL[sc as usize] };
+            if c == b'\n' {
+                return None;
+            }
+            if c != 0 {
+                let _ = vga.put(c as u16);
+                return Some(c);
+            }
+        }
+        sleep(5);
+    }
+}
+
+/// switch 交互界面:先选目标(Minecraft / MySQL / MariaDB)。
+fn switch_ui(vga: &mut Vga) {
+    loop {
+        vga.clear();
+        vga.set_cursor(2, 0);
+        let _ = writeln!(vga, "=========== switch: pick target ===========");
+        let _ = writeln!(vga, "");
+        let _ = writeln!(vga, "   1) Minecraft server version");
+        let _ = writeln!(vga, "   2) MySQL   (database backend)");
+        let _ = writeln!(vga, "   3) MariaDB (database backend)");
+        let _ = writeln!(vga, "");
+        let _ = writeln!(vga, "   q) cancel");
+        let _ = writeln!(vga, "");
+        let sel = wait_ascii(vga);
+        match sel {
+            Some(b'1') => mc_versions_ui(vga),
+            Some(b'2') => {
+                sqldb::switch_backend("mysql");
+                let _ = writeln!(vga, "");
+                let _ = writeln!(vga, "  switch: backend -> mysql (shared tablespace, data kept)");
+                crate::log!("switch: backend -> mysql (shared tablespace)");
+                sleep_short();
+                sleep_short();
+                return;
+            }
+            Some(b'3') => {
+                sqldb::switch_backend("mariadb");
+                let _ = writeln!(vga, "");
+                let _ = writeln!(vga, "  switch: backend -> mariadb (shared tablespace, data kept)");
+                crate::log!("switch: backend -> mariadb (shared tablespace)");
+                sleep_short();
+                sleep_short();
+                return;
+            }
+            _ => return,
+        }
+    }
+}
+
+/// MC 版本选择界面(分页,数字选择,n/p 翻页)。
+fn mc_versions_ui(vga: &mut Vga) {
+    const PAGE: usize = 10;
+    let total = mcver::VERSIONS.len();
+    let pages = (total + PAGE - 1) / PAGE;
+    let mut page = 0usize;
+    loop {
+        vga.clear();
+        vga.set_cursor(2, 0);
+        let _ = writeln!(
+            vga,
+            "=== switch: Minecraft versions (page {}/{} of {}) ===",
+            page + 1,
+            pages,
+            total
+        );
+        let _ = writeln!(vga, "");
+        let start = page * PAGE;
+        let end = (start + PAGE).min(total);
+        for (i, v) in mcver::VERSIONS[start..end].iter().enumerate() {
+            let n = start + i + 1;
+            let label = if n == 10 { 0 } else { n };
+            let _ = writeln!(
+                vga,
+                "   {})  {:<10}  proto={:<4} maxY={}",
+                label,
+                v.0,
+                v.1,
+                v.3.world_max_y
+            );
+        }
+        let _ = writeln!(vga, "");
+        let _ = writeln!(vga, "   n) next page    p) prev page    b) back    q) quit");
+        let _ = writeln!(vga, "");
+        let k = wait_ascii(vga);
+        match k {
+            Some(b'n') => {
+                if page + 1 < pages {
+                    page += 1;
+                }
+            }
+            Some(b'p') => {
+                if page > 0 {
+                    page -= 1;
+                }
+            }
+            Some(b'b') => return,
+            Some(b'q') => {
+                crate::log!("switch: cancelled");
+                return;
+            }
+            Some(c) if c.is_ascii_digit() => {
+                let mut idx = (c - b'0') as usize;
+                if idx == 0 {
+                    idx = 10;
+                }
+                let gi = start + idx - 1;
+                if gi < total {
+                    let name = mcver::VERSIONS[gi].0;
+                    if mcver::switch(name) {
+                        let _ = writeln!(vga, "");
+                        let _ = writeln!(
+                            vga,
+                            "  switch: now {} proto={} maxY={} bits={}",
+                            mcver::cur_name(),
+                            mcver::cur_protocol(),
+                            mcver::cur_features().world_max_y,
+                            mcver::cur_features().pack_bits
+                        );
+                        crate::log!(
+                            "switch: now {} proto={} maxY={}",
+                            mcver::cur_name(),
+                            mcver::cur_protocol(),
+                            mcver::cur_features().world_max_y
+                        );
+                        sleep_short();
+                        sleep_short();
+                        return;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// 取 ASCII 首词(命令),返回 (词, 剩余部分)。
 fn split_ascii_word(line: &[u8]) -> (&[u8], &[u8]) {
     let mut i = 0;
@@ -962,29 +1112,40 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
         }
         match cmd {
             b"help" => {
-                let _ = writeln!(vga, "  commands:");
-                let _ = writeln!(vga, "    help        this list");
-                let _ = writeln!(vga, "    pwd         print working directory");
-                let _ = writeln!(vga, "    cd [path]   change directory");
-                let _ = writeln!(vga, "    ls [path]   list directory");
-                let _ = writeln!(vga, "    cat <file>  show file contents");
-                let _ = writeln!(vga, "    systemctl   service control (start/stop/status)");
-                let _ = writeln!(vga, "    tasks       kernel task table");
-                let _ = writeln!(vga, "    mem         usable memory per NUMA node");
-                let _ = writeln!(vga, "    numa        NUMA topology + local alloc test");
-                let _ = writeln!(vga, "    genworld    parallel world generation test");
-                let _ = writeln!(vga, "    pkt         protocol pipeline check (varint/status/chunk)");
-                let _ = writeln!(vga, "    switch      list/switch MC server version (1.0 .. 26.2)");
-                let _ = writeln!(vga, "    sql         execute SQL on mysqld/mariadb (sql mysql|mariadb <stmt>)");
-                let _ = writeln!(vga, "    dbtest      database engine self-test (CRUD)");
-                let _ = writeln!(vga, "    dbiso       mysql/mariadb instance isolation check");
-                let _ = writeln!(vga, "    uptime      system uptime");
-                let _ = writeln!(vga, "    stats       scheduler statistics");
-                let _ = writeln!(vga, "    ver         version info");
-                let _ = writeln!(vga, "    eula        EULA status");
-                let _ = writeln!(vga, "    install     install system (demo)");
-                let _ = writeln!(vga, "    ctrls       Minecraft server console");
-                let _ = writeln!(vga, "    reboot      restart");
+                let _ = writeln!(vga, "  standard commands:");
+                let _ = writeln!(vga, "    pwd                     print working directory");
+                let _ = writeln!(vga, "    cd [path]               change directory");
+                let _ = writeln!(vga, "    ls [path]               list directory (ls -l style)");
+                let _ = writeln!(vga, "    cat <file>              show file contents");
+                let _ = writeln!(vga, "    head [-n N] <file>      first N lines (default 10)");
+                let _ = writeln!(vga, "    wc <file>               line/word/byte count");
+                let _ = writeln!(vga, "    grep <pat> <file>       print matching lines");
+                let _ = writeln!(vga, "    echo <text>             print text");
+                let _ = writeln!(vga, "    clear                   clear screen");
+                let _ = writeln!(vga, "    ps                      process table (kernel tasks)");
+                let _ = writeln!(vga, "    free                    memory per NUMA node");
+                let _ = writeln!(vga, "    df                      mcsrootfs usage");
+                let _ = writeln!(vga, "    uname [-a]              system info");
+                let _ = writeln!(vga, "    whoami                  current user");
+                let _ = writeln!(vga, "    hostname                host name");
+                let _ = writeln!(vga, "    uptime                  system uptime");
+                let _ = writeln!(vga, "    stats                   scheduler statistics");
+                let _ = writeln!(vga, "    ver                     version info");
+                let _ = writeln!(vga, "  Mp-minecraft commands:");
+                let _ = writeln!(vga, "    systemctl               service control (start/stop/status)");
+                let _ = writeln!(vga, "    tasks                   kernel task table");
+                let _ = writeln!(vga, "    mem                     usable memory per NUMA node");
+                let _ = writeln!(vga, "    numa                    NUMA topology + local alloc test");
+                let _ = writeln!(vga, "    genworld                parallel world generation test");
+                let _ = writeln!(vga, "    pkt                     protocol pipeline check (varint/status/chunk)");
+                let _ = writeln!(vga, "    switch                  MC version or mysql|mariadb backend");
+                let _ = writeln!(vga, "    sql                     SQL (default: current backend, or sql mysql|mariadb <stmt>)");
+                let _ = writeln!(vga, "    dbtest                  database self-test (CRUD, both backends)");
+                let _ = writeln!(vga, "    dbiso                   shared tablespace interop check (seamless switch)");
+                let _ = writeln!(vga, "    eula                    EULA status");
+                let _ = writeln!(vga, "    install                 install system (demo)");
+                let _ = writeln!(vga, "    ctrls                   Minecraft server console");
+                let _ = writeln!(vga, "    reboot                  restart");
             }
             b"tasks" => {
                 let _ = writeln!(vga, "  task table:");
@@ -1042,22 +1203,19 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                 );
             }
             b"dbiso" => {
-                let _ = writeln!(vga, "  == instance isolation check ==");
-                let out = sqldb::execute(
-                    sqldb::mysql(),
-                    "create table isoprobe (id int)",
-                );
+                let _ = writeln!(vga, "  == shared tablespace interop check ==");
+                let out = sqldb::interop_probe();
                 for line in out.lines() {
                     let _ = writeln!(vga, "{line}");
                     crate::log!("sql: {line}");
                 }
-                let ok = sqldb::isolation_ok();
+                let ok = sqldb::interop_ok();
                 let _ = writeln!(
                     vga,
-                    "  isolation: {} (mysql has isoprobe, mariadb clean)",
+                    "  interop: {} (mysql wrote isoprobe, mariadb reads it)",
                     if ok { "ok" } else { "FAIL" }
                 );
-                crate::log!("dbiso: isolation {}", if ok { "ok" } else { "FAIL" });
+                crate::log!("dbiso: interop {}", if ok { "ok" } else { "FAIL" });
                 let out = sqldb::execute(sqldb::mysql(), "drop table isoprobe");
                 for line in out.lines() {
                     let _ = writeln!(vga, "{line}");
@@ -1088,7 +1246,9 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                         core::str::from_utf8(trim_space(&rest[8..])).unwrap_or(""),
                     )
                 } else {
-                    (sqldb::mysql(), core::str::from_utf8(rest).unwrap_or(""))
+                    let cur = sqldb::current_backend();
+                    let db = if cur == "mariadb" { sqldb::mariadb() } else { sqldb::mysql() };
+                    (db, core::str::from_utf8(rest).unwrap_or(""))
                 };
                 let which = if core::ptr::eq(db, sqldb::mariadb()) { "mariadb" } else { "mysql" };
                 if !sqldb::server_running(db) {
@@ -1108,47 +1268,40 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
             }
             b"switch" => {
                 if rest.is_empty() {
-                    let cur = mcver::cur_idx();
-                    let _ = writeln!(vga, "  versions ({}, current):", mcver::VERSIONS.len());
-                    for (i, (name, proto, dv, f)) in mcver::VERSIONS.iter().enumerate() {
+                    switch_ui(vga);
+                    continue;
+                }
+                let name = core::str::from_utf8(trim_space(rest)).unwrap_or("");
+                if name.eq_ignore_ascii_case("mysql") || name.eq_ignore_ascii_case("mysqld") || name.eq_ignore_ascii_case("mariadb") {
+                    let cur = sqldb::current_backend();
+                    if sqldb::switch_backend(name) {
+                        let now = sqldb::current_backend();
                         let _ = writeln!(
                             vga,
-                            "    {}{} proto={} dv={} maxY={} bits={}",
-                            if i == cur { "* " } else { "  " },
-                            name,
-                            proto,
-                            dv,
-                            f.world_max_y,
-                            f.pack_bits
+                            "  switch: database backend {} -> {} (shared tablespace, data kept)",
+                            cur,
+                            now
                         );
+                        crate::log!("switch: backend {} -> {} (shared tablespace)", cur, now);
                     }
+                } else if mcver::switch(name) {
+                    let _ = writeln!(
+                        vga,
+                        "  switch: now {} proto={} maxY={} bits={}",
+                        mcver::cur_name(),
+                        mcver::cur_protocol(),
+                        mcver::cur_features().world_max_y,
+                        mcver::cur_features().pack_bits
+                    );
                     crate::log!(
-                        "switch: current {} proto={} maxY={}",
+                        "switch: now {} proto={} maxY={}",
                         mcver::cur_name(),
                         mcver::cur_protocol(),
                         mcver::cur_features().world_max_y
                     );
                 } else {
-                    let name = core::str::from_utf8(trim_space(rest)).unwrap_or("");
-                    if mcver::switch(name) {
-                        let _ = writeln!(
-                            vga,
-                            "  switch: now {} proto={} maxY={} bits={}",
-                            mcver::cur_name(),
-                            mcver::cur_protocol(),
-                            mcver::cur_features().world_max_y,
-                            mcver::cur_features().pack_bits
-                        );
-                        crate::log!(
-                            "switch: now {} proto={} maxY={}",
-                            mcver::cur_name(),
-                            mcver::cur_protocol(),
-                            mcver::cur_features().world_max_y
-                        );
-                    } else {
-                        let _ = writeln!(vga, "  switch: unknown version '{name}'");
-                        crate::log!("switch: unknown version '{name}'");
-                    }
+                    let _ = writeln!(vga, "  switch: unknown '{}' (MC version or mysql|mariadb)", name);
+                    crate::log!("switch: unknown '{}'", name);
                 }
             }
             b"pkt" => {
@@ -1241,7 +1394,12 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                 let _ = writeln!(vga, "  done");
             }
             b"ver" => {
-                let _ = writeln!(vga, "  Mp-minecraft System v0.1  (protocol 775, MC 26.1.2)");
+                let _ = writeln!(
+                    vga,
+                    "  Mp-minecraft System v0.1  (protocol {}, MC {})",
+                    mcver::cur_protocol(),
+                    mcver::cur_name()
+                );
             }
             b"eula" => {
                 let _ = writeln!(
@@ -1256,6 +1414,10 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                 let _ = vga.write_str("  ");
                 print_bytes(vga, &p[..len]);
                 let _ = writeln!(vga, "");
+                crate::log!(
+                    "pwd: {}",
+                    core::str::from_utf8(&p[..len]).unwrap_or("?")
+                );
             }
             b"cd" => {
                 let arg = trim_space(rest);
@@ -1308,6 +1470,10 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                             core::str::from_utf8(fs::name(id)).unwrap_or("?")
                         );
                     }
+                    crate::log!(
+                        "ls: {}",
+                        core::str::from_utf8(fs::name(id)).unwrap_or("?")
+                    );
                     c = fs::next(id);
                 }
             }
@@ -1321,9 +1487,235 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                     Some(id) if !fs::is_dir(id) => {
                         print_bytes(vga, fs::content(id));
                         let _ = writeln!(vga, "");
+                        crate::log!(
+                            "cat: {}",
+                            core::str::from_utf8(fs::content(id)).unwrap_or("?")
+                        );
                     }
                     _ => {
                         let _ = writeln!(vga, "  cat: no such file");
+                        crate::log!("cat: no such file");
+                    }
+                }
+            }
+            b"echo" => {
+                let arg = trim_space(rest);
+                if !arg.is_empty() {
+                    print_bytes(vga, arg);
+                    let _ = writeln!(vga, "");
+                }
+            }
+            b"clear" => {
+                vga.clear();
+            }
+            b"ps" => {
+                let _ = writeln!(vga, "  PID  ST  STACK       SP         NAME");
+                let _ = writeln!(vga, "  -----------------------------------");
+                for i in 0..crate::sched::MAX_TASKS {
+                    if let Some(t) = crate::sched::task_info(i) {
+                        let st = if t.2 == 0 { "R" } else { "S" };
+                        let _ = writeln!(
+                            vga,
+                            "  {:>3}  {}   {:#010x}  {:#010x}",
+                            i, st, t.0, t.1
+                        );
+                    }
+                }
+                let _ = writeln!(
+                    vga,
+                    "  ready queue: {} entries, {} cpus online",
+                    crate::sched::queue_len(),
+                    crate::smp::cpu_count()
+                );
+                crate::log!(
+                    "ps: queue_len={} cpus={}",
+                    crate::sched::queue_len(),
+                    crate::smp::cpu_count()
+                );
+            }
+            b"free" => {
+                let (mut total_mb, mut total_free) = (0u64, 0u64);
+                for n in 0..numa::node_count() {
+                    let (mb, free) = numa::node_mem(n);
+                    total_mb += mb;
+                    total_free += free;
+                    let _ = writeln!(
+                        vga,
+                        "  node {}: {} MiB usable, {} KiB free ({} frames)",
+                        n,
+                        mb,
+                        free * 4,
+                        free
+                    );
+                }
+                let _ = writeln!(
+                    vga,
+                    "  total: {} MiB usable, {} KiB free",
+                    total_mb,
+                    total_free * 4
+                );
+                crate::log!(
+                    "free: {} MiB usable, {} KiB free across {} nodes",
+                    total_mb,
+                    total_free * 4,
+                    numa::node_count()
+                );
+            }
+            b"df" => {
+                let mut bytes = 0u32;
+                let mut files = 0usize;
+                let mut dirs = 0usize;
+                for id in 0..fs::node_count() {
+                    if fs::is_dir(id) {
+                        dirs += 1;
+                    } else {
+                        files += 1;
+                        bytes += fs::size(id);
+                    }
+                }
+                let _ = writeln!(
+                    vga,
+                    "  Filesystem  Inodes  Dirs  Files  Size(B)",
+                    );
+                let _ = writeln!(
+                    vga,
+                    "  mcsrootfs   {:>5}  {:>4}  {:>5}  {:>7}",
+                    fs::node_count(),
+                    dirs,
+                    files,
+                    bytes
+                );
+                crate::log!("df: inodes={} dirs={} files={} bytes={}", fs::node_count(), dirs, files, bytes);
+            }
+            b"uname" => {
+                let arg = trim_space(rest);
+                if arg == b"-a" || arg == b"--all" {
+                    let _ = writeln!(
+                        vga,
+                        "  Mp-minecraft mcs 1.0.0 {} x86_64 Mp-minecraft/SMP",
+                        crate::mcver::cur_name()
+                    );
+                } else {
+                    let _ = writeln!(vga, "  Mp-minecraft");
+                    crate::log!("uname: Mp-minecraft");
+                }
+                crate::log!(
+                    "uname: Mp-minecraft mcs 1.0.0 {} x86_64",
+                    crate::mcver::cur_name()
+                );
+            }
+            b"whoami" => {
+                let _ = writeln!(vga, "  root");
+                crate::log!("whoami: root");
+            }
+            b"hostname" => {
+                let _ = writeln!(vga, "  mcs");
+                crate::log!("hostname: mcs");
+            }
+            b"head" => {
+                let arg = trim_space(rest);
+                let mut lines = 10usize;
+                let mut path: &[u8] = arg;
+                if let Some(rest2) = arg.strip_prefix(b"-n ") {
+                    let mut it = rest2.splitn(2, |c| *c == b' ');
+                    if let Some(ps) = it.next() {
+                        if let Ok(n) = core::str::from_utf8(ps).unwrap_or("0").parse::<usize>() {
+                            lines = n;
+                            path = it.next().unwrap_or(b"");
+                        }
+                    }
+                }
+                if path.is_empty() {
+                    let _ = writeln!(vga, "  head: missing operand");
+                    continue;
+                }
+                match fs::resolve(unsafe { CWD }, path) {
+                    Some(id) if !fs::is_dir(id) => {
+                        let c = fs::content(id);
+                        let mut n = 0;
+                        let mut start = 0usize;
+                        for (i, b) in c.iter().enumerate() {
+                            if *b == b'\n' {
+                                print_bytes(vga, &c[start..=i]);
+                                n += 1;
+                                start = i + 1;
+                                if n >= lines {
+                                    break;
+                                }
+                            }
+                        }
+                        if n < lines && start < c.len() {
+                            print_bytes(vga, &c[start..]);
+                            let _ = writeln!(vga, "");
+                        }
+                    }
+                    _ => {
+                        let _ = writeln!(vga, "  head: no such file");
+                    }
+                }
+                crate::log!("head: {} lines", lines);
+            }
+            b"wc" => {
+                let arg = trim_space(rest);
+                if arg.is_empty() {
+                    let _ = writeln!(vga, "  wc: missing operand");
+                    continue;
+                }
+                match fs::resolve(unsafe { CWD }, arg) {
+                    Some(id) if !fs::is_dir(id) => {
+                        let c = fs::content(id);
+                        let mut lines = 0usize;
+                        let mut words = 0usize;
+                        let mut in_word = false;
+                        for b in c {
+                            if *b == b'\n' {
+                                lines += 1;
+                            }
+                            if *b == b' ' || *b == b'\n' || *b == b'\t' {
+                                in_word = false;
+                            } else if !in_word {
+                                words += 1;
+                                in_word = true;
+                            }
+                        }
+                        let name = core::str::from_utf8(fs::name(id)).unwrap_or("?");
+                        let _ = writeln!(vga, "  {:>6} {:>6} {:>6} {}", lines, words, c.len(), name);
+                        crate::log!("wc: {} {} {} {}", lines, words, c.len(), name);
+                    }
+                    _ => {
+                        let _ = writeln!(vga, "  wc: no such file");
+                    }
+                }
+            }
+            b"grep" => {
+                let arg = trim_space(rest);
+                let mut it = arg.splitn(2, |c| *c == b' ');
+                let pat = it.next().unwrap_or(b"");
+                let path = it.next().unwrap_or(b"");
+                if pat.is_empty() || path.is_empty() {
+                    let _ = writeln!(vga, "  grep: usage: grep <pattern> <file>");
+                    continue;
+                }
+                match fs::resolve(unsafe { CWD }, path) {
+                    Some(id) if !fs::is_dir(id) => {
+                        let c = fs::content(id);
+                        let mut start = 0usize;
+                        for (i, b) in c.iter().enumerate() {
+                            if *b == b'\n' || i + 1 == c.len() {
+                                let end = if *b == b'\n' { i + 1 } else { c.len() };
+                                if c[start..end].windows(pat.len()).any(|w| w == pat) {
+                                    print_bytes(vga, &c[start..end]);
+                                    crate::log!(
+                                        "grep: {}",
+                                        core::str::from_utf8(&c[start..end]).unwrap_or("?")
+                                    );
+                                }
+                                start = i + 1;
+                            }
+                        }
+                    }
+                    _ => {
+                        let _ = writeln!(vga, "  grep: no such file");
                     }
                 }
             }
@@ -1642,7 +2034,12 @@ fn server_console(vga: &mut Vga) {
                 let _ = writeln!(vga, "");
             }
             b"version" => {
-                let _ = writeln!(vga, "  Mp-minecraft Server 0.1 (protocol 775, MC 26.1.2)");
+                let _ = writeln!(
+                    vga,
+                    "  Mp-minecraft Server 0.1 (protocol {}, MC {})",
+                    mcver::cur_protocol(),
+                    mcver::cur_name()
+                );
             }
             b"fg" => {
                 let _ = writeln!(vga, "  back to system shell");
@@ -1814,7 +2211,12 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     let _ = writeln!(vga, "================================================================");
     let _ = writeln!(vga, "");
     let _ = writeln!(vga, "   Memory:   {:.1} MiB usable", mem as f64 / 1048576.0);
-    let _ = writeln!(vga, "   Protocol: 775  (Minecraft Java 26.1.2)");
+    let _ = writeln!(
+        vga,
+        "   Protocol: {}  (Minecraft Java {})",
+        mcver::cur_protocol(),
+        mcver::cur_name()
+    );
     let _ = writeln!(vga, "   EULA:     {}", if accepted { "accepted" } else { "rejected" });
     let _ = writeln!(vga, "");
 
