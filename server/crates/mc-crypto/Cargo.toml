@@ -1,0 +1,8 @@
+[package]
+name = "mc-crypto"
+version = "0.1.0"
+edition = "2024"
+description = "no_std crypto for mcssh: sha1/sha256/sha512, hmac, chacha20-poly1305, x25519, ed25519"
+
+[lib]
+path = "src/lib.rs"

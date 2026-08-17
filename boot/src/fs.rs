@@ -115,6 +115,7 @@ pub fn init() -> usize {
     add_dir(b"root", root as i32);
     add_dir(b"run", root as i32);
     let sbin = add_dir(b"sbin", root as i32);
+    let service = add_dir(b"service", root as i32);
     add_dir(b"srv", root as i32);
     add_dir(b"sys", root as i32);
     add_dir(b"tmp", root as i32);
@@ -125,10 +126,18 @@ pub fn init() -> usize {
     let usr_bin = add_dir(b"bin", usr as i32);
     let usr_lib = add_dir(b"lib", usr as i32);
     let usr_share = add_dir(b"share", usr as i32);
+    let usr_local = add_dir(b"local", usr as i32);
+    let var_cache = add_dir(b"cache", var as i32);
     let var_log = add_dir(b"log", var as i32);
     let var_lib = add_dir(b"lib", var as i32);
+    let var_run = add_dir(b"run", var as i32);
+    let var_tmp = add_dir(b"tmp", var as i32);
     let mc_lib = add_dir(b"minecraft", var_lib as i32);
     let mc_world = add_dir(b"world", mc_lib as i32);
+    let _ = usr_local;
+    let _ = var_cache;
+    let _ = var_run;
+    let _ = var_tmp;
     // 可执行占位
     add_file(b"ls", bin as i32, b"# builtin\n");
     add_file(b"cat", bin as i32, b"# builtin\n");
@@ -159,6 +168,22 @@ pub fn init() -> usize {
     add_file(b"passwd", etc as i32, b"root:x:0:0:root:/root:/bin/mcssh\ndev:x:1000:1000:dev:/home/dev:/bin/mcssh\n");
     add_file(b"motd", etc as i32, b"Welcome to Mp-minecraft System!\n");
     add_file(b"eula.txt", etc as i32, b"eula=true\n");
+    // /service:Mp-minecraft 服务器核心与数据库后端(共享表空间,switch 无痕切换)
+    add_file(
+        b"mc-server",
+        service as i32,
+        b"Mp-minecraft server core (embedded, version-switchable 1.0..26.2)\n",
+    );
+    add_file(
+        b"mysql",
+        service as i32,
+        b"mysqld.service data dir -> shared tablespace\nuse: switch mysql | sql <stmt>\n",
+    );
+    add_file(
+        b"mariadb",
+        service as i32,
+        b"mariadb.service data dir -> shared tablespace (seamless switch)\nuse: switch mariadb | sql <stmt>\n",
+    );
     add_file(
         b"mcs.conf",
         etc as i32,
@@ -209,6 +234,19 @@ pub fn init() -> usize {
         mc_world as i32,
         b"level-name=world\nseed=0\n",
     );
+    for id in 0..unsafe { NODES_N } {
+        if id == 0 {
+            continue;
+        }
+        let mut p = [0u8; 96];
+        let len = full_path(id, &mut p);
+        if len > 1 {
+            crate::log!(
+                "fs: {}",
+                core::str::from_utf8(&p[..len]).unwrap_or("?")
+            );
+        }
+    }
     root
 }
 
