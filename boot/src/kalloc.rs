@@ -35,12 +35,13 @@ unsafe impl GlobalAlloc for KernelAlloc {
         let aligned = (b + align - 1) & !(align - 1);
         let waste = aligned - b;
         let waste_pages = waste >> 12;
-        for i in 0..waste_pages {
-            crate::numa::free(base + (i as u64) * 0x1000);
+        if waste_pages > 0 {
+            crate::numa::free_contig(base, waste_pages);
         }
         let used = (layout.size() + 0xfff) >> 12;
-        for i in (waste_pages + used)..pages {
-            crate::numa::free(base + (i as u64) * 0x1000);
+        let tail = pages - waste_pages - used;
+        if tail > 0 {
+            crate::numa::free_contig(base + (waste_pages as u64 + used as u64) * 0x1000, tail);
         }
         crate::sched::sched_preempt_enable();
         aligned as *mut u8
@@ -49,10 +50,8 @@ unsafe impl GlobalAlloc for KernelAlloc {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         crate::sched::sched_preempt_disable();
         let pages = (layout.size() + 0xfff) >> 12;
-        let mut p = ptr as u64;
-        for _ in 0..pages {
-            crate::numa::free(p);
-            p += 0x1000;
+        if pages > 0 {
+            crate::numa::free_contig(ptr as u64, pages);
         }
         FREE_CNT.fetch_add(1, Ordering::Relaxed);
         crate::sched::sched_preempt_enable();

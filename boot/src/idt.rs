@@ -3,6 +3,12 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+/// per-CPU 原子,64B 缓存行对齐(防伪共享)。
+#[repr(align(64))]
+struct AlU64(AtomicU64);
+#[repr(align(64))]
+struct AlBool(AtomicBool);
+
 const APIC: u64 = 0xFEE0_0000;
 const TMR_LVT: u32 = 0x320;
 const TMR_DIV: u32 = 0x3E0;
@@ -54,9 +60,9 @@ static mut IDT: [u64; 512] = [0; 512];
 static mut IDT_DESC: [u8; 10] = [0; 10];
 static mut TSC_PER_TICK: [u64; 64] = [0; 64];
 /// 每核 tick 计数(stats/uptime)。
-static TICK_COUNT: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+static TICK_COUNT: [AlU64; 64] = [const { AlU64(AtomicU64::new(0)) }; 64];
 static TICK_TOTAL: AtomicU64 = AtomicU64::new(0);
-static TICKS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+static TICKS: [AlU64; 64] = [const { AlU64(AtomicU64::new(0)) }; 64];
 static IDT_READY: AtomicBool = AtomicBool::new(false);
 
 fn apic_w(off: u32, v: u32) {
@@ -125,11 +131,11 @@ pub fn tick_total() -> u64 {
 
 /// 每核 tick 数。
 pub fn tick_cpu(cpu: usize) -> u64 {
-    TICK_COUNT[cpu].load(Ordering::Relaxed)
+    TICK_COUNT[cpu].0.load(Ordering::Relaxed)
 }
 
 pub fn ticks(cpu: usize) -> u64 {
-    TICKS[cpu].load(Ordering::Relaxed)
+    TICKS[cpu].0.load(Ordering::Relaxed)
 }
 
 fn dump(fr: &Frame) {
@@ -183,9 +189,9 @@ pub extern "C" fn int_handler(f: *mut Frame) {
     let fr = unsafe { &*f };
     if fr.vec == TICK_VEC as u64 {
         let id = lapic_id() as usize;
-        TICKS[id].fetch_add(1, Ordering::Relaxed);
+        TICKS[id].0.fetch_add(1, Ordering::Relaxed);
         apic_w(EOI, 0); // 先 EOI:on_tick 可能切栈不再返回
-        TICK_COUNT[id].fetch_add(1, Ordering::Relaxed);
+        TICK_COUNT[id].0.fetch_add(1, Ordering::Relaxed);
         TICK_TOTAL.fetch_add(1, Ordering::Relaxed);
         crate::sched::on_tick(f);
         return;
