@@ -6,13 +6,13 @@
 extern crate alloc;
 
 mod acpi;
-mod kalloc;
 mod emb;
+mod kalloc;
 mod fs;
 mod idt;
 mod kb;
-mod sched;
 mod numa;
+mod sched;
 mod smp;
 mod spinlock;
 
@@ -401,14 +401,57 @@ impl Write for Com1 {
     }
 }
 
+/// 栈上格式化缓冲(日志行 ≤256B),经 C klogf 输出 COM1 + 内存环形缓冲。
+pub struct LogBuf {
+    buf: [u8; 256],
+    len: usize,
+}
+impl LogBuf {
+    pub fn new() -> Self {
+        LogBuf { buf: [0; 256], len: 0 }
+    }
+    pub fn as_cstr(&mut self) -> *const u8 {
+        self.buf[self.len] = 0;
+        self.buf.as_ptr()
+    }
+}
+impl core::fmt::Write for LogBuf {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for b in s.bytes() {
+            if self.len < self.buf.len() - 1 {
+                self.buf[self.len] = b;
+                self.len += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "klog")]
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {{
         use core::fmt::Write;
-        let _ = write!(crate::Com1, "[kernel] ");
-        let _ = write!(crate::Com1, $($arg)*);
-        let _ = writeln!(crate::Com1);
+        let mut b = crate::LogBuf::new();
+        let _ = write!(b, "[kernel] ");
+        let _ = write!(b, $($arg)*);
+        unsafe {
+            crate::klogf(2, b"%s\0".as_ptr(), b.as_cstr());
+        }
     }};
+}
+
+#[cfg(not(feature = "klog"))]
+#[macro_export]
+macro_rules! log {
+    ($($arg:tt)*) => {{}};
+}
+
+#[cfg(feature = "klog")]
+unsafe extern "C" {
+    pub fn klog_init();
+    pub fn klogf(level: i32, fmt: *const u8, ...);
+    pub fn kerr(code: i32, what: *const u8, a: u64, b: u64, c: u64);
 }
 
 // ---------------- PS/2 键盘 ----------------
@@ -916,6 +959,7 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                 let _ = writeln!(vga, "    ls [path]   list directory");
                 let _ = writeln!(vga, "    cat <file>  show file contents");
                 let _ = writeln!(vga, "    systemctl   service control (start/stop/status)");
+                let _ = writeln!(vga, "    tasks       kernel task table");
                 let _ = writeln!(vga, "    mem         usable memory per NUMA node");
                 let _ = writeln!(vga, "    numa        NUMA topology + local alloc test");
                 let _ = writeln!(vga, "    ver         version info");
@@ -923,6 +967,37 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                 let _ = writeln!(vga, "    install     install system (demo)");
                 let _ = writeln!(vga, "    ctrls       Minecraft server console");
                 let _ = writeln!(vga, "    reboot      restart");
+            }
+            b"tasks" => {
+                let _ = writeln!(vga, "  task table:");
+                let mut any = false;
+                for i in 0..crate::sched::MAX_TASKS {
+                    if let Some(t) = crate::sched::task_info(i) {
+                        any = true;
+                        let _ = writeln!(
+                            vga,
+                            "    [{i}] stack={:#x} sp={:#x} q={}",
+                            t.0,
+                            t.1,
+                            t.2
+                        );
+                    }
+                }
+                if !any {
+                    let _ = writeln!(vga, "    (no tasks)");
+                }
+                let _ = writeln!(
+                    vga,
+                    "    ready queue: {} entries, {} cpus online",
+                    crate::sched::queue_len(),
+                    crate::smp::cpu_count()
+                );
+                crate::sched::dump_tasks();
+                crate::log!(
+                    "tasks: queue_len={} cpus={}",
+                    crate::sched::queue_len(),
+                    crate::smp::cpu_count()
+                );
             }
             b"genworld" => {
                 let (w1, r2) = split_ascii_word(rest);
@@ -1442,6 +1517,10 @@ fn setup_paging() {
 pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     setup_paging();
     com1_init();
+    #[cfg(feature = "klog")]
+    unsafe {
+        klog_init();
+    }
     font_init();
     fs::init();
     numa::init(mb2_info);
