@@ -7,6 +7,7 @@ extern crate alloc;
 
 mod acpi;
 mod emb;
+mod mcver;
 mod kalloc;
 mod fs;
 mod idt;
@@ -972,6 +973,7 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                 let _ = writeln!(vga, "    numa        NUMA topology + local alloc test");
                 let _ = writeln!(vga, "    genworld    parallel world generation test");
                 let _ = writeln!(vga, "    pkt         protocol pipeline check (varint/status/chunk)");
+                let _ = writeln!(vga, "    switch      list/switch MC server version (1.0 .. 26.2)");
                 let _ = writeln!(vga, "    uptime      system uptime");
                 let _ = writeln!(vga, "    stats       scheduler statistics");
                 let _ = writeln!(vga, "    ver         version info");
@@ -1034,6 +1036,51 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                     sw,
                     idt::tick_total()
                 );
+            }
+            b"switch" => {
+                if rest.is_empty() {
+                    let cur = mcver::cur_idx();
+                    let _ = writeln!(vga, "  versions ({}, current):", mcver::VERSIONS.len());
+                    for (i, (name, proto, dv, f)) in mcver::VERSIONS.iter().enumerate() {
+                        let _ = writeln!(
+                            vga,
+                            "    {}{} proto={} dv={} maxY={} bits={}",
+                            if i == cur { "* " } else { "  " },
+                            name,
+                            proto,
+                            dv,
+                            f.world_max_y,
+                            f.pack_bits
+                        );
+                    }
+                    crate::log!(
+                        "switch: current {} proto={} maxY={}",
+                        mcver::cur_name(),
+                        mcver::cur_protocol(),
+                        mcver::cur_features().world_max_y
+                    );
+                } else {
+                    let name = core::str::from_utf8(trim_space(rest)).unwrap_or("");
+                    if mcver::switch(name) {
+                        let _ = writeln!(
+                            vga,
+                            "  switch: now {} proto={} maxY={} bits={}",
+                            mcver::cur_name(),
+                            mcver::cur_protocol(),
+                            mcver::cur_features().world_max_y,
+                            mcver::cur_features().pack_bits
+                        );
+                        crate::log!(
+                            "switch: now {} proto={} maxY={}",
+                            mcver::cur_name(),
+                            mcver::cur_protocol(),
+                            mcver::cur_features().world_max_y
+                        );
+                    } else {
+                        let _ = writeln!(vga, "  switch: unknown version '{name}'");
+                        crate::log!("switch: unknown version '{name}'");
+                    }
+                }
             }
             b"pkt" => {
                 let (w1, _) = split_ascii_word(rest);
