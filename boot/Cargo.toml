@@ -27,3 +27,5 @@ debug = false
 strip = "debuginfo"
 [dependencies]
 mc-world = { path = "../server/crates/mc-world", default-features = false }
+mc-hotpath = { path = "../server/crates/mc-hotpath" }
+mc-protocol = { path = "../server/crates/mc-protocol" }
