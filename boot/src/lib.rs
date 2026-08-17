@@ -483,6 +483,35 @@ impl Write for Com1 {
     }
 }
 
+/// 轮询读 COM1 RX(16550)。无数据返回 None。不可达端口读回 0xFF 时视为无 COM。
+fn com1_rx() -> Option<u8> {
+    unsafe {
+        let lsr: u8;
+        core::arch::asm!(
+            "in al, dx",
+            in("dx") 0x3FDu16,
+            out("al") lsr,
+            options(nomem, nostack)
+        );
+        if lsr == 0xFF || lsr & 0x01 == 0 {
+            return None;
+        }
+        let c: u8;
+        core::arch::asm!(
+            "in al, dx",
+            in("dx") 0x3F8u16,
+            out("al") c,
+            options(nomem, nostack)
+        );
+        Some(c)
+    }
+}
+
+/// 串口字符是否有效输入(可打印、回车、退格)。
+fn com1_valid(ch: u8) -> bool {
+    ch == b'\r' || ch == b'\n' || ch == 0x08 || ch == 0x7F || ch >= 0x20
+}
+
 /// 栈上格式化缓冲(日志行 ≤256B),经 C klogf 输出 COM1 + 内存环形缓冲。
 pub struct LogBuf {
     buf: [u8; 256],
@@ -546,8 +575,11 @@ pub unsafe fn kerr(_code: i32, _what: *const u8, _a: u64, _b: u64, _c: u64) {
 
 // ---------------- PS/2 键盘 ----------------
 
-/// 轮询读键盘扫描码(0x60)。
+/// 轮询读键盘扫描码(0x60)。无 i8042 时恒 None。
 fn poll_scancode() -> Option<u8> {
+    if !kb::PS2_OK.load(core::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
     unsafe {
         let status: u8;
         core::arch::asm!(
@@ -783,11 +815,47 @@ fn ime_commit(vga: &mut Vga, idx: usize, buf: &mut [u8], len: &mut usize) {
 }
 
 /// 读一行输入(最长 buf.len()-1 字节,汉字占 2 字节)。回车返回长度。
+/// 输入源:PS/2 键盘(优先)+ COM1 串口。无键盘平台完全走串口。
 fn read_line(vga: &mut Vga, prompt: &str, buf: &mut [u8]) -> usize {
     let _ = vga.write_str(prompt);
     let mut len = 0usize;
     let mut shift = false;
     loop {
+        if let Some(c) = com1_rx() {
+            if !com1_valid(c) {
+                continue;
+            }
+            let ch = if c == b'\r' { b'\n' } else { c };
+            if ch == b'\n' {
+                vga.put('\n' as u16);
+                ime_clear();
+                return len;
+            }
+            if ch == 0x08 || ch == 0x7F {
+                if unsafe { IME_PY_LEN } > 0 {
+                    unsafe {
+                        IME_PY_LEN -= 1;
+                    }
+                    ime_refresh(vga);
+                    vga.backspace();
+                } else if len > 0 {
+                    if len >= 2 && buf[len - 2] >= 0xA1 && buf[len - 1] >= 0xA1 {
+                        len -= 2;
+                        vga.backspace2();
+                    } else {
+                        len -= 1;
+                        vga.backspace();
+                    }
+                }
+                continue;
+            }
+            if ch >= 0x20 && len < buf.len() - 1 {
+                buf[len] = ch;
+                len += 1;
+                vga.put(ch as u16);
+            }
+            continue;
+        }
         if let Some(sc) = poll_scancode() {
             if sc & 0x80 != 0 {
                 // 松开事件
@@ -988,9 +1056,19 @@ fn total_memory(info: *const u8) -> u64 {
 
 
 /// 等待一个可打印键(映射 shift/忽略释放/回车返回 None=Enter)。
+/// PS/2 + 串口双输入源。
 fn wait_ascii(vga: &mut Vga) -> Option<u8> {
     let mut shift = false;
     loop {
+        if let Some(c) = com1_rx() {
+            if c == b'\r' || c == b'\n' {
+                return None;
+            }
+            if c >= 0x20 {
+                let _ = vga.put(c as u16);
+                return Some(c);
+            }
+        }
         if let Some(sc) = poll_scancode() {
             if sc & 0x80 != 0 {
                 if sc == 0xAA || sc == 0xB6 {
@@ -2146,6 +2224,23 @@ fn eula_prompt(vga: &mut Vga) -> bool {
     let _ = writeln!(vga, "   [N] I do not agree (reboot)");
     let _ = writeln!(vga, "");
     loop {
+        if let Some(c) = com1_rx() {
+            match c {
+                b'y' | b'Y' => {
+                    log!("EULA accepted");
+                    let _ = writeln!(vga, "   EULA accepted.");
+                    sleep_short();
+                    return true;
+                }
+                b'n' | b'N' => {
+                    log!("EULA rejected, rebooting");
+                    let _ = writeln!(vga, "   EULA rejected, rebooting...");
+                    sleep_short();
+                    reboot();
+                }
+                _ => {}
+            }
+        }
         if let Some(sc) = kb::pop().or_else(poll_scancode) {
             match sc {
                 0x15 => {
