@@ -18,6 +18,15 @@ fn main() {
         build.file("src/klog_off.c");
     }
     build.compile("mcs_boot");
+    cc::Build::new()
+        .files(["../server/native/varint.c", "../server/native/bitpack.c"])
+        .target("x86_64-mcs.json")
+        .flag("-m64")
+        .flag("-fno-stack-protector")
+        .opt_level(2)
+        .compile("mcs_native");
+    println!("cargo:rerun-if-changed=../server/native/varint.c");
+    println!("cargo:rerun-if-changed=../server/native/bitpack.c");
     println!("cargo:rerun-if-changed=src/boot.S");
     println!("cargo:rerun-if-changed=src/tramp.S");
     println!("cargo:rerun-if-changed=src/idt.S");

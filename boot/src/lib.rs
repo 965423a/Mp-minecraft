@@ -999,6 +999,11 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                     crate::smp::cpu_count()
                 );
             }
+            b"pkt" => {
+                let (w1, _) = split_ascii_word(rest);
+                let seed = parse_dec_u64(w1).unwrap_or(0xC0FFEE);
+                emb::cmd_pkt(vga, seed);
+            }
             b"genworld" => {
                 let (w1, r2) = split_ascii_word(rest);
                 let (w2, _) = split_ascii_word(r2);
