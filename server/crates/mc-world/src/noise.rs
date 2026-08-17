@@ -94,6 +94,52 @@ impl Noise {
         lerp(y1, lerp(x1, x2, v), w)
     }
 
+    /// 沿 y 轴扫描一条列的 3D 噪声:固定 (x,z) 的格点索引只算一次,
+    /// 每层只重算 y 维的哈希与插值。用于洞穴雕刻等逐列扫描。
+    pub fn noise3_yline(&self, x: f64, z: f64, y0: f64, y_step: f64, out: &mut [f64]) {
+        let xf = libm::floor(x);
+        let zf = libm::floor(z);
+        let xi = ((xf as i64) & 255) as usize;
+        let zi = ((zf as i64) & 255) as usize;
+        let xfrac = x - xf;
+        let zfrac = z - zf;
+        let u = fade(xfrac);
+        let w = fade(zfrac);
+        let p = &self.perm;
+        let a = p[xi] as usize + zi;
+        let b = p[xi + 1] as usize + zi;
+        let h_aa = p[a];
+        let h_ab = p[a + 1];
+        let h_ba = p[b];
+        let h_bb = p[b + 1];
+        let mut y = y0;
+        for o in out.iter_mut() {
+            let yf = libm::floor(y);
+            let yi = ((yf as i64) & 255) as usize;
+            let yfrac = y - yf;
+            let v = fade(yfrac);
+            let aa = h_aa as usize + yi;
+            let ab = h_ab as usize + yi;
+            let ba = h_ba as usize + yi;
+            let bb = h_bb as usize + yi;
+            let x1 = lerp(grad3(p[aa], xfrac, yfrac, zfrac), grad3(p[ba], xfrac - 1.0, yfrac, zfrac), u);
+            let x2 = lerp(grad3(p[ab], xfrac, yfrac - 1.0, zfrac), grad3(p[bb], xfrac - 1.0, yfrac - 1.0, zfrac), u);
+            let y1 = lerp(x1, x2, v);
+            let x1 = lerp(
+                grad3(p[aa + 1], xfrac, yfrac, zfrac - 1.0),
+                grad3(p[ba + 1], xfrac - 1.0, yfrac, zfrac - 1.0),
+                u,
+            );
+            let x2 = lerp(
+                grad3(p[ab + 1], xfrac, yfrac - 1.0, zfrac - 1.0),
+                grad3(p[bb + 1], xfrac - 1.0, yfrac - 1.0, zfrac - 1.0),
+                u,
+            );
+            *o = lerp(y1, lerp(x1, x2, v), w);
+            y += y_step;
+        }
+    }
+
     /// fBm 分形叠加,输出约 [-1, 1]。
     pub fn fbm2(&self, x: f64, y: f64, octaves: usize, lacunarity: f64, gain: f64) -> f64 {
         let mut amp = 1.0;
