@@ -53,6 +53,9 @@ fn stub_base() -> u64 {
 static mut IDT: [u64; 512] = [0; 512];
 static mut IDT_DESC: [u8; 10] = [0; 10];
 static mut TSC_PER_TICK: [u64; 64] = [0; 64];
+/// 每核 tick 计数(stats/uptime)。
+static TICK_COUNT: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+static TICK_TOTAL: AtomicU64 = AtomicU64::new(0);
 static TICKS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
 static IDT_READY: AtomicBool = AtomicBool::new(false);
 
@@ -115,6 +118,16 @@ fn arm(idx: usize, tpu: u64) {
     }
 }
 
+/// 系统累计 tick(1ms/次)。
+pub fn tick_total() -> u64 {
+    TICK_TOTAL.load(Ordering::Relaxed)
+}
+
+/// 每核 tick 数。
+pub fn tick_cpu(cpu: usize) -> u64 {
+    TICK_COUNT[cpu].load(Ordering::Relaxed)
+}
+
 pub fn ticks(cpu: usize) -> u64 {
     TICKS[cpu].load(Ordering::Relaxed)
 }
@@ -172,6 +185,8 @@ pub extern "C" fn int_handler(f: *mut Frame) {
         let id = lapic_id() as usize;
         TICKS[id].fetch_add(1, Ordering::Relaxed);
         apic_w(EOI, 0); // 先 EOI:on_tick 可能切栈不再返回
+        TICK_COUNT[id].fetch_add(1, Ordering::Relaxed);
+        TICK_TOTAL.fetch_add(1, Ordering::Relaxed);
         crate::sched::on_tick(f);
         return;
     }

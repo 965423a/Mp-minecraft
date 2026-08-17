@@ -962,6 +962,10 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                 let _ = writeln!(vga, "    tasks       kernel task table");
                 let _ = writeln!(vga, "    mem         usable memory per NUMA node");
                 let _ = writeln!(vga, "    numa        NUMA topology + local alloc test");
+                let _ = writeln!(vga, "    genworld    parallel world generation test");
+                let _ = writeln!(vga, "    pkt         protocol pipeline check (varint/status/chunk)");
+                let _ = writeln!(vga, "    uptime      system uptime");
+                let _ = writeln!(vga, "    stats       scheduler statistics");
                 let _ = writeln!(vga, "    ver         version info");
                 let _ = writeln!(vga, "    eula        EULA status");
                 let _ = writeln!(vga, "    install     install system (demo)");
@@ -997,6 +1001,30 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                     "tasks: queue_len={} cpus={}",
                     crate::sched::queue_len(),
                     crate::smp::cpu_count()
+                );
+            }
+            b"uptime" => {
+                let ms = idt::tick_total();
+                let _ = writeln!(
+                    vga,
+                    "  uptime: {}s ({} ms, {} ticks)",
+                    ms / 1000,
+                    ms,
+                    ms
+                );
+                crate::log!("uptime: {}s ({} ticks)", ms / 1000, ms);
+            }
+            b"stats" => {
+                let sw = crate::sched::SWITCHES.load(core::sync::atomic::Ordering::Relaxed);
+                let _ = writeln!(vga, "  stats: switches={sw}");
+                for c in 0..crate::smp::cpu_count() {
+                    let t = idt::tick_cpu(c);
+                    let _ = writeln!(vga, "  stats: cpu{c} ticks={t}");
+                }
+                crate::log!(
+                    "stats: switches={} ticks={}",
+                    sw,
+                    idt::tick_total()
                 );
             }
             b"pkt" => {
