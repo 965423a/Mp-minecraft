@@ -86,15 +86,18 @@ impl WorldGenerator {
     fn fill_normal(&self, chunk: &mut Chunk) {
         let base_x = cx0(chunk.cx);
         let base_z = cz0(chunk.cz);
+        // 表面高度缓存:填充列、洞穴雕刻、树生成共用,避免重复 fbm。
+        let mut hts = [0i32; 256];
         for lx in 0..16 {
             for lz in 0..16 {
                 let wx = base_x + lx as i32;
                 let wz = base_z + lz as i32;
                 let height = self.surface_height(wx, wz);
+                hts[lz * 16 + lx] = height;
                 self.fill_column(chunk, wx, wz, height);
             }
         }
-        self.carve_caves(chunk);
+        self.carve_caves(chunk, &hts);
         let n = &self.detail;
         if n.noise2(base_x as f64 * 0.01, base_z as f64 * 0.01) > 0.82 {
             let tx = 8 + (n.noise2(base_x as f64, base_z as f64) * 4.0) as i32;
@@ -102,7 +105,7 @@ impl WorldGenerator {
             if tx >= 0 && tx < 16 && tz >= 0 && tz < 16 {
                 let wx = base_x + tx;
                 let wz = base_z + tz;
-                let top = self.surface_height(wx, wz);
+                let top = hts[tz as usize * 16 + tx as usize];
                 if Self::is_solid_surface(chunk.get(wx, top, wz)) && top > SEA_LEVEL {
                     self.grow_tree(chunk, wx, top + 1, wz);
                 }
@@ -174,25 +177,39 @@ impl WorldGenerator {
     }
 
     /// 洞穴:3D 噪声走廊,削掉石头/泥土(不挖水)。
-    fn carve_caves(&self, chunk: &mut Chunk) {
+    /// 只雕到表面高度以下(hts 为 16×16 表面高度缓存),减少 20%+ 噪声计算。
+    fn carve_caves(&self, chunk: &mut Chunk, hts: &[i32; 256]) {
         let (bx, bz) = (cx0(chunk.cx), cz0(chunk.cz));
+        let mut n1 = [0f64; 160];
+        let mut n2 = [0f64; 160];
         for lx in 0..16 {
             for lz in 0..16 {
                 let wx = bx + lx as i32;
                 let wz = bz + lz as i32;
-                for y in (MIN_Y + 4)..(SEA_LEVEL + 24) {
-                    let n = self.cave3d.noise3(
-                        wx as f64 * 0.09,
-                        y as f64 * 0.12,
-                        wz as f64 * 0.09,
-                    );
-                    // 第二层噪声形成走廊结构
-                    let n2 = self.cave3d.noise3(
-                        wx as f64 * 0.03 + 100.0,
-                        y as f64 * 0.05,
-                        wz as f64 * 0.03,
-                    );
-                    if n > 0.92 && n2 > 0.0 {
+                let surf = hts[lz * 16 + lx].min(SEA_LEVEL + 24);
+                let mut y0 = MIN_Y + 4;
+                if surf <= y0 {
+                    continue;
+                }
+                // 列级噪声:同 (wx,wz) 前缀复用,沿 y 扫描。
+                let m = (surf - y0) as usize;
+                self.cave3d.noise3_yline(
+                    wx as f64 * 0.09,
+                    wz as f64 * 0.09,
+                    y0 as f64 * 0.12,
+                    0.12,
+                    &mut n1[..m],
+                );
+                self.cave3d.noise3_yline(
+                    wx as f64 * 0.03 + 100.0,
+                    wz as f64 * 0.03,
+                    y0 as f64 * 0.05,
+                    0.05,
+                    &mut n2[..m],
+                );
+                for i in 0..m {
+                    let y = y0 + i as i32;
+                    if n1[i] > 0.92 && n2[i] > 0.0 {
                         let id = chunk.get(wx, y, wz);
                         if id == STONE || id == DIRT || id == GRAVEL {
                             chunk.set(wx, y, wz, AIR);
