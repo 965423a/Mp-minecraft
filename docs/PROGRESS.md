@@ -104,6 +104,22 @@
     逐 y 扫描只重算 y 维 —— 雕刻列噪声开销降约 1/3;
   实测内核 genworld 128 块:34.5s → 18.9s(约 -45%),allocs=frees 无泄漏。
 
+- switch 交互式界面:输入 switch 出文字菜单,
+  第一屏选目标(1=Minecraft 版本 / 2=MySQL / 3=MariaDB),
+  Minecraft 进入第二屏分页版本列表(数字选择,n/p 翻页,b 返回,q 退出);
+  数据库后端直接切换,数据层为共享表空间(无痕切换,数据互通)。
+- 文件系统仿 Arch FHS:/bin /boot /dev /etc /home /lib /media /mnt /opt
+  /proc /root /run /sbin /service /srv /sys /tmp /usr /var
+  (usr/local、var/cache|log|lib|run|tmp、var/lib/minecraft/world);
+  新增 /service 放置 mc-server、mysql、mariadb(启动时完整目录树镜像到串口)。
+- 数据库无痕切换:mysqld/mariadb 共享同一表空间(shared tablespace),
+  switch mysql|mariadb 只切换默认后端,数据保留;
+  sql 无前缀用当前后端,dbiso 改为互通检查(interop:mysql 写入 mariadb 读到)。
+- 标准命令(Arch/GNU 风格,自定义命令不受影响):
+  echo/clear/ps(任务表)/free(内存)/df(mcsrootfs)/uname -a/whoami/hostname/
+  head -n N/wc/grep + 原有 pwd/cd/ls -l/cat;命令输出镜像到串口日志;
+  ver/version/install 版本横幅动态取当前 switch 版本。
+
 ## 决策记录(已定案)
 
 - 语言:Rust 主体 + C 热路径(varint/位打包/NBT),内核入口汇编最小必要。
