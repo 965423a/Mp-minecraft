@@ -3,7 +3,7 @@
 //! idle 不入队:每核 CUR=0xFFFF 表示当前在 idle 上下文。
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::idt::Frame;
 use crate::spinlock::SpinLock;
@@ -54,6 +54,23 @@ static mut TASKS: [Task; MAX_TASKS] = [Task { stack: 0, sp: 0, quantum: QUANTUM 
 static mut QUEUE: Queue = Queue::new();
 static QUEUE_LOCK: SpinLock = SpinLock::new();
 static CUR: [AtomicU32; 64] = [const { AtomicU32::new(IDLE) }; 64];
+/// 累计上下文切换次数(stats 命令)。
+pub static SWITCHES: AtomicU64 = AtomicU64::new(0);
+/// 退出标记:exit() 后等 tick 切走并释放槽位。
+static DEAD: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
+
+/// 当前任务主动退出(genworld 等一次性任务用)。
+/// 标记 dead 后 spin,下一个 tick 切回 idle 并释放槽位。
+pub fn exit() -> ! {
+    let cpu = crate::idt::lapic_id() as usize;
+    let cur = CUR[cpu].load(Ordering::Relaxed);
+    if cur != IDLE {
+        DEAD[cur as usize].store(true, Ordering::Relaxed);
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
 static IDLE_SP: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
 static PREEMPT: [AtomicU32; 64] = [const { AtomicU32::new(0) }; 64];
 
@@ -189,6 +206,20 @@ pub fn on_tick(fr: *mut Frame) {
 
     if cur != IDLE {
         QUEUE_LOCK.lock();
+        if DEAD[cur as usize].load(Ordering::Relaxed) {
+            // 已退出:释放槽位,回 idle(下一轮 tick 恢复主流程)
+            DEAD[cur as usize].store(false, Ordering::Relaxed);
+            unsafe { (*tasks().add(cur as usize)).stack = 0 };
+            CUR[cpu].store(IDLE, Ordering::Relaxed);
+            SWITCHES.fetch_add(1, Ordering::Relaxed);
+            QUEUE_LOCK.unlock();
+            let isp = IDLE_SP[cpu].load(Ordering::Relaxed);
+            if isp == 0 {
+                return;
+            }
+            check_frame(isp, "dead");
+            sched_jump(isp);
+        }
         let t = unsafe { &mut *tasks().add(cur as usize) };
         if t.quantum > 1 {
             t.quantum -= 1;
@@ -259,6 +290,7 @@ pub fn on_tick(fr: *mut Frame) {
                         if isp == 0 {
                             return;
                         }
+                        SWITCHES.fetch_add(1, Ordering::Relaxed);
                         check_frame(isp, "idle-restore");
                         sched_jump(isp);
                     }
@@ -280,6 +312,7 @@ pub fn on_tick(fr: *mut Frame) {
         }
         QUEUE_LOCK.unlock();
         if let Some(_n) = next {
+            SWITCHES.fetch_add(1, Ordering::Relaxed);
             check_frame(nsp, "idle->task");
             sched_jump(nsp);
         }

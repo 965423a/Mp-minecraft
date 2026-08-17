@@ -42,9 +42,7 @@ fn gen_task() -> ! {
     }
     GEN_TOTAL.fetch_add(made, Ordering::Relaxed);
     GEN_DONE.fetch_add(1, Ordering::Relaxed);
-    loop {
-        core::hint::spin_loop();
-    }
+    crate::sched::exit();
 }
 
 /// 服务化世界生成:mc-server.service 的真实内核任务。
