@@ -1,7 +1,14 @@
-//! NUMA:节点表 + 每节点空闲帧链分配器(SRAT > 命令行 > 单节点)。
+//! NUMA:节点表 + 分桶连续帧分配器(SRAT > 命令行 > 单节点)。
+//!
+//! 优化(相对旧版单链):1) 连续块按 2^k 页分桶,alloc_contig 从最小
+//! 可容纳桶取块,O(#桶) 而非 O(帧数);块首 16B = [len_pages, next]。
+//! 2) 每节点独立锁,跨节点分配并行;3) NumaNode 64B 缓存行对齐,
+//! 避免伪共享。
 
 const MAX_NODES: usize = 8;
 const MAX_SPANS: usize = 8;
+/// 连续块桶数:2^0..2^10 页(1..1024),与 alloc_contig 上限一致。
+const NUM_BUCKETS: usize = 11;
 
 /// 页表静态映射上限(与 boot.S 一致),超出部分不参与帧链。
 const MAX_PHYS: u64 = 16 * 1024 * 1024 * 1024;
@@ -10,13 +17,18 @@ const MAX_PHYS: u64 = 16 * 1024 * 1024 * 1024;
 const DIST_SAME: u8 = 10;
 const DIST_REMOTE: u8 = 20;
 
+/// 单帧链与块桶共享 free_cnt(空闲帧总数)。
 #[derive(Clone, Copy)]
+#[repr(C, align(64))]
 struct NumaNode {
     id: u8,
     pages: u64,
-    free_head: u64,
     free_cnt: u64,
     alloc_cnt: u64,
+    /// 单帧链(8B/帧,pop/单帧 free 用)。
+    free_head: u64,
+    /// 连续块桶:buckets[k] = 块链头,块首 16B = [len_pages, next]。
+    buckets: [u64; NUM_BUCKETS],
     /// 本节点 usable 区间集合(node_of 精确归属判定,支持不连续内存)。
     spans: [(u64, u64); MAX_SPANS],
     span_cnt: usize,
@@ -25,9 +37,10 @@ struct NumaNode {
 static mut NODES: [NumaNode; MAX_NODES] = [NumaNode {
     id: 0,
     pages: 0,
-    free_head: 0,
     free_cnt: 0,
     alloc_cnt: 0,
+    free_head: 0,
+    buckets: [0; NUM_BUCKETS],
     spans: [(0, 0); MAX_SPANS],
     span_cnt: 0,
 }; MAX_NODES];
@@ -44,7 +57,10 @@ static mut SLIT: [[u8; 64]; 64] = [[0; 64]; 64];
 static mut INTERLEAVE_LAST: usize = 0;
 
 /// 帧链临界区锁(BSP 与 AP 并发分配/释放时保护空闲链)。
-static NODES_LOCK: crate::spinlock::SpinLock = crate::spinlock::SpinLock::new();
+/// 每节点独立锁(跨节点分配并行)。
+static NODES_LOCK: [crate::spinlock::SpinLock; MAX_NODES] = [const {
+    crate::spinlock::SpinLock::new()
+}; MAX_NODES];
 
 unsafe extern "C" {
     static _start: u8;
@@ -245,7 +261,53 @@ fn add_span(n: usize, a0: u64, b0: u64) {
     }
 }
 
-/// 把 [a, b) 串成空闲帧链(高端向低端)。
+fn floor_log2(x: u64) -> u32 {
+    (63 - x.leading_zeros()) as u32
+}
+
+fn ceil_log2(x: u64) -> u32 {
+    let f = floor_log2(x);
+    if x & (x - 1) == 0 {
+        f
+    } else {
+        f + 1
+    }
+}
+
+/// 块首 16B = [len_pages, next]。len 为 1 时走单帧链(8B/帧)。
+fn block_read(addr: u64) -> (u64, u64) {
+    unsafe {
+        (
+            (addr as *const u64).read_volatile(),
+            (addr as *const u64).add(1).read_volatile(),
+        )
+    }
+}
+
+fn block_write(addr: u64, len: u64, next: u64) {
+    unsafe {
+        (addr as *mut u64).write_volatile(len);
+        (addr as *mut u64).add(1).write_volatile(next);
+    }
+}
+
+/// 块/单帧入空闲(调用方须持有节点锁)。
+fn push_free_locked(n: usize, addr: u64, len: u64) {
+    unsafe {
+        if len == 1 {
+            (addr as *mut u64).write_volatile(NODES[n].free_head);
+            NODES[n].free_head = addr;
+        } else {
+            let k = floor_log2(len) as usize;
+            let k = k.min(NUM_BUCKETS - 1);
+            block_write(addr, len, NODES[n].buckets[k]);
+            NODES[n].buckets[k] = addr;
+        }
+        NODES[n].free_cnt += len;
+    }
+}
+
+/// 把 [a, b) 切成 2^k 页连续块入桶(高端向低端,优先大块)。
 fn link_frames(n: usize, a: u64, b: u64) {
     unsafe {
         if b <= a {
@@ -256,25 +318,15 @@ fn link_frames(n: usize, a: u64, b: u64) {
         if b <= a {
             return;
         }
-        let mut prev = NODES[n].free_head;
-        let mut cnt = 0u64;
         let mut p = b;
-        loop {
-            p -= 0x1000;
-            if p < a {
-                break;
-            }
-            (p as *mut u64).write_volatile(prev);
-            prev = p;
-            cnt += 1;
-            if p <= a {
-                break;
-            }
-        }
-        if cnt > 0 {
-            NODES[n].free_head = prev;
-            NODES[n].free_cnt += cnt;
-            NODES[n].pages += cnt;
+        while p - 0x1000 >= a {
+            let len = (p - a) / 0x1000;
+            let k = floor_log2(len).min(NUM_BUCKETS as u32 - 1);
+            let blk = 1u64 << k;
+            let start = p - blk * 0x1000;
+            push_free_locked(n, start, blk);
+            NODES[n].pages += blk;
+            p = start;
         }
     }
 }
@@ -357,6 +409,7 @@ pub fn init(info: *const u8) -> usize {
                 id: ranges[i].id,
                 pages: 0,
                 free_head: 0,
+                buckets: [0; NUM_BUCKETS],
                 free_cnt: 0,
                 alloc_cnt: 0,
                 spans: [(0, 0); MAX_SPANS],
@@ -437,23 +490,31 @@ pub fn node_distance(i: usize, j: usize) -> u8 {
 
 /// 本地节点优先分配一帧;本地耗尽按 SLIT 距离就近 fallback。返回物理地址。
 pub fn alloc_local(node: usize) -> Option<u64> {
-    NODES_LOCK.lock();
-    let r = unsafe { alloc_local_locked(node) };
-    NODES_LOCK.unlock();
+    if unsafe { NODE_CNT == 0 } {
+        return None;
+    }
+    let n = if node < unsafe { NODE_CNT } { node } else { 0 };
+    NODES_LOCK[n].lock();
+    let r = unsafe {
+        if NODES[n].free_cnt > 0 {
+            take_one_locked(n)
+        } else {
+            None
+        }
+    };
+    NODES_LOCK[n].unlock();
     r
 }
 
-fn alloc_local_locked(node: usize) -> Option<u64> {
+/// 本节点无帧时,找 SLIT 距离最近的邻节点(锁外决策,避免持多锁)。
+pub fn alloc_local_fallback(node: usize) -> Option<u64> {
+    if unsafe { NODE_CNT == 0 } {
+        return None;
+    }
+    let n = if node < unsafe { NODE_CNT } { node } else { 0 };
+    let mut best = usize::MAX;
+    let mut best_d = 0u8;
     unsafe {
-        if NODE_CNT == 0 {
-            return None;
-        }
-        let n = if node < NODE_CNT { node } else { 0 };
-        if NODES[n].free_cnt > 0 {
-            return pop(n);
-        }
-        let mut best = usize::MAX;
-        let mut best_d = 0u8;
         for i in 0..NODE_CNT {
             if i != n && NODES[i].free_cnt > 0 {
                 let d = node_distance(n, i);
@@ -463,11 +524,14 @@ fn alloc_local_locked(node: usize) -> Option<u64> {
                 }
             }
         }
-        if best != usize::MAX {
-            return pop(best);
-        }
-        None
     }
+    if best == usize::MAX {
+        return None;
+    }
+    NODES_LOCK[best].lock();
+    let r = unsafe { take_one_locked(best) };
+    NODES_LOCK[best].unlock();
+    r
 }
 
 /// 节点 0 优先分配。
@@ -477,30 +541,62 @@ pub fn alloc() -> Option<u64> {
 
 /// 交错分配:跨节点轮流取帧(round-robin)。
 pub fn alloc_interleave() -> Option<u64> {
-    NODES_LOCK.lock();
-    let r = unsafe { alloc_interleave_locked() };
-    NODES_LOCK.unlock();
-    r
+    unsafe {
+        for _ in 0..NODE_CNT {
+            INTERLEAVE_LAST = (INTERLEAVE_LAST + 1) % NODE_CNT;
+            let n = INTERLEAVE_LAST;
+            NODES_LOCK[n].lock();
+            let r = unsafe {
+                if NODES[n].free_cnt > 0 {
+                    take_one_locked(n)
+                } else {
+                    None
+                }
+            };
+            NODES_LOCK[n].unlock();
+            if r.is_some() {
+                return r;
+            }
+        }
+    }
+    None
 }
 
 /// 从节点 n 的帧链摘出 `n_frames` 个物理连续帧,返回起始地址。
 /// 帧链的 next 指针跨区间拼接,物理地址不单调,故扫描全链找连续段。
 /// 释放:对每帧分别 `free(start + k*0x1000)` 即可。
 pub fn alloc_contig(node: usize, n_frames: usize) -> Option<u64> {
-    NODES_LOCK.lock();
-    let r = unsafe {
-        if n_frames == 0 || n_frames > 1024 || node >= NODE_CNT {
-            None
-        } else {
-            alloc_contig_locked(node, n_frames)
-        }
-    };
-    NODES_LOCK.unlock();
+    if n_frames == 0 || n_frames > 1024 || node >= unsafe { NODE_CNT } {
+        return None;
+    }
+    NODES_LOCK[node].lock();
+    let r = unsafe { alloc_contig_locked(node, n_frames) };
+    NODES_LOCK[node].unlock();
     r
 }
 
 fn alloc_contig_locked(node: usize, n: usize) -> Option<u64> {
     unsafe {
+        // 最小可容纳桶:ceil_log2(n)
+        let k0 = ceil_log2(n as u64) as usize;
+        for k in k0.min(NUM_BUCKETS - 1)..NUM_BUCKETS {
+            let head = NODES[node].buckets[k];
+            if head == 0 {
+                continue;
+            }
+            let (len, next) = block_read(head);
+            NODES[node].buckets[k] = next;
+            if len > n as u64 {
+                // 剩余部分(连续)重新入桶
+                let rem = len - n as u64;
+                let addr = head + (n as u64) * 0x1000;
+                push_free_locked(node, addr, rem);
+            }
+            NODES[node].free_cnt -= n as u64;
+            NODES[node].alloc_cnt += n as u64;
+            return Some(head);
+        }
+        // 无大块:从单帧链逐帧拼(退化路径)
         let mut prev: u64 = 0;
         let mut cur = NODES[node].free_head;
         while cur != 0 {
@@ -525,7 +621,6 @@ fn alloc_contig_locked(node: usize, n: usize) -> Option<u64> {
                 NODES[node].alloc_cnt += n as u64;
                 return Some(start);
             }
-            // 失败:start 保留在链中,下一候选起点 = 链中下一帧
             let nxt = (start as *const u64).read_volatile();
             if nxt == 0 {
                 break;
@@ -537,20 +632,18 @@ fn alloc_contig_locked(node: usize, n: usize) -> Option<u64> {
     }
 }
 
-fn alloc_interleave_locked() -> Option<u64> {
+/// 取单帧:单帧链有则取,无则从连续块桶取 1 帧(调用方须已持有节点锁)。
+fn take_one_locked(n: usize) -> Option<u64> {
     unsafe {
-        for _ in 0..NODE_CNT {
-            INTERLEAVE_LAST = (INTERLEAVE_LAST + 1) % NODE_CNT;
-            let n = INTERLEAVE_LAST;
-            if NODES[n].free_cnt > 0 {
-                return pop(n);
-            }
+        if NODES[n].free_head != 0 {
+            pop(n)
+        } else {
+            alloc_contig_locked(n, 1)
         }
-        None
     }
 }
 
-/// 内部取帧(调用方须已持有 NODES_LOCK)。
+/// 内部取帧(调用方须已持有节点锁)。
 fn pop(n: usize) -> Option<u64> {
     unsafe {
         let head = NODES[n].free_head;
@@ -585,24 +678,39 @@ pub fn free(phys: u64) {
     if phys == 0 {
         return;
     }
-    NODES_LOCK.lock();
+    let n = node_of(phys);
+    NODES_LOCK[n].lock();
     unsafe {
-        let n = node_of(phys);
-        let covered = (0..NODES[n].span_cnt).any(|s| {
-            let (a, b) = NODES[n].spans[s];
-            phys >= a && phys < b
-        });
-        if !covered {
+        if !node_covered(n, phys) {
             crate::log!("numa: free({phys:#x}) outside node spans, rejected");
-            NODES_LOCK.unlock();
+            NODES_LOCK[n].unlock();
             return;
         }
-        let head = NODES[n].free_head;
-        (phys as *mut u64).write_volatile(head);
-        NODES[n].free_head = phys;
-        NODES[n].free_cnt += 1;
+        push_free_locked(n, phys, 1);
     }
-    NODES_LOCK.unlock();
+    NODES_LOCK[n].unlock();
+}
+
+/// 批量释放连续块(整块入桶,保持连续性,优于逐帧)。
+pub fn free_contig(phys: u64, pages: usize) {
+    if phys == 0 || pages == 0 {
+        return;
+    }
+    let n = node_of(phys);
+    NODES_LOCK[n].lock();
+    unsafe {
+        if !node_covered(n, phys) || !node_covered(n, phys + (pages as u64 - 1) * 0x1000) {
+            crate::log!("numa: free_contig({phys:#x}, {pages}) outside node spans, rejected");
+            NODES_LOCK[n].unlock();
+            return;
+        }
+        push_free_locked(n, phys, pages as u64);
+    }
+    NODES_LOCK[n].unlock();
+}
+
+fn node_covered(n: usize, phys: u64) -> bool {
+    unsafe { (0..NODES[n].span_cnt).any(|s| { let (a, b) = NODES[n].spans[s]; phys >= a && phys < b }) }
 }
 
 pub fn node_count() -> usize {

@@ -5,6 +5,14 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+/// per-CPU 原子,64B 缓存行对齐(防伪共享:邻核不共享行)。
+#[repr(align(64))]
+struct AlU32(AtomicU32);
+#[repr(align(64))]
+struct AlU64(AtomicU64);
+#[repr(align(64))]
+struct AlBool(AtomicBool);
+
 use crate::idt::Frame;
 use crate::spinlock::SpinLock;
 
@@ -53,38 +61,38 @@ struct Task {
 static mut TASKS: [Task; MAX_TASKS] = [Task { stack: 0, sp: 0, quantum: QUANTUM }; MAX_TASKS];
 static mut QUEUE: Queue = Queue::new();
 static QUEUE_LOCK: SpinLock = SpinLock::new();
-static CUR: [AtomicU32; 64] = [const { AtomicU32::new(IDLE) }; 64];
+static CUR: [AlU32; 64] = [const { AlU32(AtomicU32::new(IDLE)) }; 64];
 /// 累计上下文切换次数(stats 命令)。
 pub static SWITCHES: AtomicU64 = AtomicU64::new(0);
 /// 退出标记:exit() 后等 tick 切走并释放槽位。
-static DEAD: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
+static DEAD: [AlBool; 64] = [const { AlBool(AtomicBool::new(false)) }; 64];
 
 /// 当前任务主动退出(genworld 等一次性任务用)。
 /// 标记 dead 后 spin,下一个 tick 切回 idle 并释放槽位。
 pub fn exit() -> ! {
     let cpu = crate::idt::lapic_id() as usize;
-    let cur = CUR[cpu].load(Ordering::Relaxed);
+    let cur = CUR[cpu].0.load(Ordering::Relaxed);
     if cur != IDLE {
-        DEAD[cur as usize].store(true, Ordering::Relaxed);
+        DEAD[cur as usize].0.store(true, Ordering::Relaxed);
     }
     loop {
         core::hint::spin_loop();
     }
 }
-static IDLE_SP: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
-static PREEMPT: [AtomicU32; 64] = [const { AtomicU32::new(0) }; 64];
+static IDLE_SP: [AlU64; 64] = [const { AlU64(AtomicU64::new(0)) }; 64];
+static PREEMPT: [AlU32; 64] = [const { AlU32(AtomicU32::new(0)) }; 64];
 
 /// 持锁等临界区调用:期间 tick 不抢占当前任务。
 #[unsafe(no_mangle)]
 pub extern "C" fn sched_preempt_disable() {
     let cpu = crate::idt::lapic_id() as usize;
-    PREEMPT[cpu].fetch_add(1, Ordering::Relaxed);
+    PREEMPT[cpu].0.fetch_add(1, Ordering::Relaxed);
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn sched_preempt_enable() {
     let cpu = crate::idt::lapic_id() as usize;
-    PREEMPT[cpu].fetch_sub(1, Ordering::Relaxed);
+    PREEMPT[cpu].0.fetch_sub(1, Ordering::Relaxed);
 }
 
 struct Queue {
@@ -190,8 +198,8 @@ pub fn spawn(entry: fn() -> !) -> Option<u32> {
 /// 每核进入主循环前调用:idle 上下文就绪。
 pub fn register_idle() {
     let cpu = crate::idt::lapic_id() as usize;
-    CUR[cpu].store(IDLE, Ordering::Relaxed);
-    IDLE_SP[cpu].store(0, Ordering::Relaxed);
+    CUR[cpu].0.store(IDLE, Ordering::Relaxed);
+    IDLE_SP[cpu].0.store(0, Ordering::Relaxed);
 }
 
 /// tick 中断里调用:时间片用完则切栈换任务。
@@ -199,21 +207,27 @@ pub fn register_idle() {
 /// 队列轮转回自己的标记时恢复现场(主流程继续)。
 pub fn on_tick(fr: *mut Frame) {
     let cpu = crate::idt::lapic_id() as usize;
-    if PREEMPT[cpu].load(Ordering::Relaxed) != 0 {
+    if PREEMPT[cpu].0.load(Ordering::Relaxed) != 0 {
         return; // 持锁临界区,时间片冻结
     }
-    let cur = CUR[cpu].load(Ordering::Relaxed);
+    let cur = CUR[cpu].0.load(Ordering::Relaxed);
 
     if cur != IDLE {
         QUEUE_LOCK.lock();
-        if DEAD[cur as usize].load(Ordering::Relaxed) {
-            // 已退出:释放槽位,回 idle(下一轮 tick 恢复主流程)
-            DEAD[cur as usize].store(false, Ordering::Relaxed);
-            unsafe { (*tasks().add(cur as usize)).stack = 0 };
-            CUR[cpu].store(IDLE, Ordering::Relaxed);
+        if DEAD[cur as usize].0.load(Ordering::Relaxed) {
+            // 已退出:释放槽位与栈内存,回 idle(下一轮 tick 恢复主流程)
+            DEAD[cur as usize].0.store(false, Ordering::Relaxed);
+            unsafe {
+                let st = (*tasks().add(cur as usize)).stack;
+                if st != 0 {
+                    crate::numa::free_contig(st, STACK_PAGES);
+                }
+                (*tasks().add(cur as usize)).stack = 0;
+            }
+            CUR[cpu].0.store(IDLE, Ordering::Relaxed);
             SWITCHES.fetch_add(1, Ordering::Relaxed);
             QUEUE_LOCK.unlock();
-            let isp = IDLE_SP[cpu].load(Ordering::Relaxed);
+            let isp = IDLE_SP[cpu].0.load(Ordering::Relaxed);
             if isp == 0 {
                 return;
             }
@@ -237,8 +251,8 @@ pub fn on_tick(fr: *mut Frame) {
                     if n as usize == IDLE_TAG as usize | cpu {
                         // 轮转回本核空闲标记:恢复主流程现场
                         QUEUE_LOCK.unlock();
-                        let isp = IDLE_SP[cpu].load(Ordering::Relaxed);
-                        CUR[cpu].store(IDLE, Ordering::Relaxed);
+                        let isp = IDLE_SP[cpu].0.load(Ordering::Relaxed);
+                        CUR[cpu].0.store(IDLE, Ordering::Relaxed);
                         if isp == 0 {
                             return;
                         }
@@ -260,14 +274,14 @@ pub fn on_tick(fr: *mut Frame) {
         match next {
             Some(n) if n == cur => return,
             Some(n) => {
-                CUR[cpu].store(n, Ordering::Relaxed);
+                CUR[cpu].0.store(n, Ordering::Relaxed);
                 check_frame(nsp, "switch");
                 sched_jump(nsp);
             }
             None => {
                 // 队列只剩自己的标记或空,回 idle
-                CUR[cpu].store(IDLE, Ordering::Relaxed);
-                let isp = IDLE_SP[cpu].load(Ordering::Relaxed);
+                CUR[cpu].0.store(IDLE, Ordering::Relaxed);
+                let isp = IDLE_SP[cpu].0.load(Ordering::Relaxed);
                 if isp == 0 {
                     return;
                 }
@@ -286,7 +300,7 @@ pub fn on_tick(fr: *mut Frame) {
                     if n as usize == IDLE_TAG as usize | cpu {
                         // 恢复本核主流程(之前被切走)
                         QUEUE_LOCK.unlock();
-                        let isp = IDLE_SP[cpu].load(Ordering::Relaxed);
+                        let isp = IDLE_SP[cpu].0.load(Ordering::Relaxed);
                         if isp == 0 {
                             return;
                         }
@@ -306,8 +320,8 @@ pub fn on_tick(fr: *mut Frame) {
             }
         }
         if let Some(n) = next {
-            IDLE_SP[cpu].store(fr as u64, Ordering::Relaxed);
-            CUR[cpu].store(n, Ordering::Relaxed);
+            IDLE_SP[cpu].0.store(fr as u64, Ordering::Relaxed);
+            CUR[cpu].0.store(n, Ordering::Relaxed);
             unsafe { queue().push(IDLE_TAG | cpu as u32) }; // 本核标记入队(锁内)
         }
         QUEUE_LOCK.unlock();
@@ -365,8 +379,8 @@ fn check_frame(sp: u64, tag: &str) {
             let cpu = crate::idt::lapic_id() as usize;
             crate::log!(
                 "sched: BAD FRAME {tag} sp={sp:#x} cpu{cpu} CUR={:#x} IDLE_SP={:#x} rip=0 cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} err={:#x} vec={:#x}",
-                CUR[cpu].load(Ordering::Relaxed),
-                IDLE_SP[cpu].load(Ordering::Relaxed),
+                CUR[cpu].0.load(Ordering::Relaxed),
+                IDLE_SP[cpu].0.load(Ordering::Relaxed),
                 f.cs,
                 f.rflags,
                 f.rsp,
