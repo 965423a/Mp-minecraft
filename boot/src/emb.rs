@@ -6,7 +6,6 @@ use alloc::string::String;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use mc_protocol::buf::{ReadBuf, WriteBuf};
-use mc_protocol::consts::{PROTOCOL_VERSION, VERSION_NAME};
 use mc_protocol::packets::play::clientbound::write_chunk_data;
 use mc_protocol::packets::status::clientbound::write_response;
 use mc_world::chunk::SECTIONS;
@@ -147,8 +146,10 @@ fn pack_chunk_data(chunk: &mc_world::Chunk, cx: i32, cz: i32) -> usize {
     let mut w = WriteBuf::with_capacity(4096);
     let mut packed: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let mut nsections = 0usize;
-    let bits = 8u32;
-    for i in 0..SECTIONS {
+    let f = crate::mcver::cur_features();
+    let bits = f.pack_bits;
+    let max_sec = ((f.world_max_y + 64) / 16).clamp(0, SECTIONS as i32) as usize;
+    for i in 0..max_sec {
         let sec = chunk.section(i);
         if sec.is_empty() {
             continue;
@@ -202,7 +203,9 @@ pub fn cmd_pkt(vga: &mut crate::Vga, seed: u64) {
 
     // 2) Status Response 帧封装 + 解码 round-trip
     let json = format!(
-        r#"{{"version":{{"name":"{VERSION_NAME}","protocol":{PROTOCOL_VERSION}}},"players":{{"max":16,"online":1}},"description":{{"text":"mcs-kernel"}}}}"#
+        r#"{{"version":{{"name":"{}","protocol":{}}},"players":{{"max":16,"online":1}},"description":{{"text":"mcs-kernel"}}}}"#,
+        crate::mcver::cur_name(),
+        crate::mcver::cur_protocol()
     );
     let mut body = WriteBuf::with_capacity(256);
     write_response(&mut body, &json);
@@ -217,15 +220,19 @@ pub fn cmd_pkt(vga: &mut crate::Vga, seed: u64) {
     let _ = core::fmt::write(
         &mut *vga,
         format_args!(
-            "  pkt: status frame {}B roundtrip {} ({VERSION_NAME} proto={PROTOCOL_VERSION})\n",
+            "  pkt: status frame {}B roundtrip {} ({} proto={})\n",
             frame.len(),
-            if ok2 { "ok" } else { "FAIL" }
+            if ok2 { "ok" } else { "FAIL" },
+            crate::mcver::cur_name(),
+            crate::mcver::cur_protocol()
         ),
     );
     crate::log!(
-        "pkt: status frame {}B roundtrip {} ({VERSION_NAME} proto={PROTOCOL_VERSION})",
+        "pkt: status frame {}B roundtrip {} ({} proto={})",
         frame.len(),
-        if ok2 { "ok" } else { "FAIL" }
+        if ok2 { "ok" } else { "FAIL" },
+        crate::mcver::cur_name(),
+        crate::mcver::cur_protocol()
     );
 
     // 3) 真实区块:生成 → 位打包 → chunk data 帧
