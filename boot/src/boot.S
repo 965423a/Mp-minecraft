@@ -9,6 +9,18 @@ header_start:
     .long MB2_ARCH_I386
     .long header_end - header_start
     .long 0x100000000 - (MB2_MAGIC + MB2_ARCH_I386 + (header_end - header_start))
+    /* framebuffer 请求 tag(type=5, flags=0, size=20):告诉 GRUB 本内核
+       需要图形 framebuffer(没有这个 tag,GRUB 会认为 OS 只接受 VGA 文本,
+       强制 gfxpayload=text/auto 并覆盖 grub.cfg 的设置,Hyper-V Gen2
+       没有 VGA 文本硬件 -> 黑屏)。1024x768x32 请求失败时 GRUB 会追加
+       ;auto(EFI,回退 GOP 当前模式)或 ;text(BIOS,回退 VGA 文本)。 */
+    .short 5, 0
+    .long 20
+    .long 1024
+    .long 768
+    .long 32
+    /* tag 间 8 字节对齐填充(20 字节 tag 后补 4 字节) */
+    .long 0
     /* 结束 tag:type=0, flags=0, size=8 */
     .short 0, 0
     .long 8

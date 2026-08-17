@@ -48,7 +48,10 @@ pub fn init(mb2_info: *const u8) {
             let height = crate::u32le_pub(unsafe { p.add(24) });
             let bpp = unsafe { p.add(28).read_volatile() };
             let ftype = unsafe { p.add(29).read_volatile() };
-            if addr != 0 && (ftype == 1 || ftype == 3) {
+            // type==2 = direct RGB(标准 VBE/GOP framebuffer,GRUB 2.x 唯一传的);
+            // type==1 = indexed。GRUB 无图形模式时会把 VGA 文本(0xB8000)也
+            // 打包成 tag,必须用地址下限(>1MiB)排除它,否则会误当像素显存写坏。
+            if addr != 0 && addr >= 0x100000 && (ftype == 1 || ftype == 2) {
                 unsafe {
                     FB = Some(FbInfo { addr, pitch, width, height, bpp });
                 }
