@@ -6,6 +6,7 @@ members = [
     "crates/mc-hotpath",
     "crates/mc-sched",
     "crates/mc-server",
+    "crates/mc-crypto",
 ]
 
 [workspace.package]

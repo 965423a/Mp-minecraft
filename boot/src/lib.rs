@@ -7,6 +7,7 @@ extern crate alloc;
 
 mod acpi;
 mod emb;
+mod fb;
 mod mcver;
 mod sqldb;
 mod kalloc;
@@ -61,17 +62,30 @@ fn inb(port: u16) -> u8 {
     v
 }
 
+pub(crate) fn u32le_pub(p: *const u8) -> u32 {
+    unsafe {
+        p.read_volatile() as u32
+            | ((p.add(1).read_volatile() as u32) << 8)
+            | ((p.add(2).read_volatile() as u32) << 16)
+            | ((p.add(3).read_volatile() as u32) << 24)
+    }
+}
+
+pub(crate) fn u64le_pub(p: *const u8) -> u64 {
+    u32le_pub(p) as u64 | ((u32le_pub(unsafe { p.add(4) }) as u64) << 32)
+}
+
 // ---------------- VGA 文本模式 + 汉字字形 ----------------
 
-const VGA_MEM: *mut u16 = 0xB8000 as *mut u16; // 文本显存(plane 0/1)
+pub(crate) const VGA_MEM: *mut u16 = 0xB8000 as *mut u16; // 文本显存(plane 0/1)
 const FONT_MEM: *mut u8 = 0xA0000 as *mut u8; // 字库 RAM(plane 2)
-const COLS: usize = 80;
-const ROWS: usize = 25;
-const ATTR: u8 = 0x0F; // 白字黑底
+pub(crate) const COLS: usize = 80;
+pub(crate) const ROWS: usize = 25;
+pub(crate) const ATTR: u8 = 0x0F; // 白字黑底
 const BLACK: u16 = 0x0000; // 黑底黑字(窗框黑条)
 
 /// 逻辑屏幕缓冲:ASCII(< 0x80)或 GB2312 码(0xA1A1 起)或 0(空)。
-static mut CELL: [u16; COLS * ROWS] = [0; COLS * ROWS];
+pub(crate) static mut CELL: [u16; COLS * ROWS] = [0; COLS * ROWS];
 /// 已分配字形槽数(调试用)。
 static mut SLOT_NEXT: usize = 0;
 
@@ -138,8 +152,14 @@ fn vga_write(offset: usize, ch: u16) {
 }
 
 /// 渲染逻辑格到显存(ASCII 1 格,汉字 2 格并分配字形槽)。
+/// framebuffer 激活时走像素渲染。
 fn render_cell(pos: usize, disp_off: &mut usize) {
     let cell = unsafe { CELL[pos] };
+    if fb::active() {
+        fb::render_cell(pos, cell);
+        *disp_off += if is_hanzi(cell) { 2 } else { 1 };
+        return;
+    }
     let a = (ATTR as u16) << 8;
     if !is_hanzi(cell) {
         vga_write(*disp_off, a | (cell & 0x7F) as u16);
@@ -180,6 +200,10 @@ fn render_all() {
     unsafe {
         SLOT_NEXT = 0;
     }
+    if fb::active() {
+        fb::render_all();
+        return;
+    }
     let mut off = 0usize;
     for pos in 0..(COLS * ROWS) {
         render_cell(pos, &mut off);
@@ -193,7 +217,63 @@ fn screen_clear() {
             p.add(i).write(0);
         }
     }
+    if fb::active() {
+        fb::clear_all();
+        return;
+    }
     for off in 0..(COLS * ROWS) {
+        vga_write(off, BLACK | 0x20);
+    }
+}
+
+/// 弹层(候选框/IME 状态条)写一个普通格:文本模式直接写显存,framebuffer 画像素。
+fn text_put_cell(off: usize, ch: u8, attr: u8) {
+    if fb::active() {
+        fb::draw_off(off, ch as u16, attr);
+    } else {
+        vga_write(off, ((attr as u16) << 8) | ch as u16);
+    }
+}
+
+/// 弹层写一个汉字(文本模式占字形槽 2 格;framebuffer 画 16x16)。
+fn text_put_gb(off: usize, gb: u16, attr: u8) {
+    if fb::active() {
+        fb::draw_off(off, gb, attr);
+    } else {
+        let slot = unsafe { SLOT_NEXT };
+        if slot >= 64 {
+            vga_write(off, ((attr as u16) << 8) | b'?' as u16);
+            vga_write(off + 1, ((attr as u16) << 8) | b' ' as u16);
+            return;
+        }
+        unsafe {
+            SLOT_NEXT = slot + 1;
+        }
+        let c0 = 0x80 + slot * 2;
+        let c1 = c0 + 1;
+        if let Some(g) = hzk_glyph(gb) {
+            let mut left = [0u8; 16];
+            let mut right = [0u8; 16];
+            for i in 0..16 {
+                left[i] = g[i * 2];
+                right[i] = g[i * 2 + 1];
+            }
+            font_upload(c0, &left);
+            font_upload(c1, &right);
+            vga_write(off, ((attr as u16) << 8) | c0 as u16);
+            vga_write(off + 1, ((attr as u16) << 8) | c1 as u16);
+        } else {
+            vga_write(off, ((attr as u16) << 8) | b'?' as u16);
+            vga_write(off + 1, ((attr as u16) << 8) | b' ' as u16);
+        }
+    }
+}
+
+/// 弹层清格(黑条/黑底)。
+fn text_clear_cell(off: usize) {
+    if fb::active() {
+        fb::fill_off(off);
+    } else {
         vga_write(off, BLACK | 0x20);
     }
 }
@@ -594,7 +674,7 @@ fn candidates_clear() {
     }
     let base = row * COLS;
     for off in base..base + COLS * 3 {
-        vga_write(off, BLACK | 0x20);
+        text_clear_cell(off);
     }
     unsafe {
         IME_CAND_ROW = 0;
@@ -613,50 +693,31 @@ fn candidates_render(vga: &Vga) {
     let base = y * COLS;
     // 先清 3 行(候选行 + 上下黑条),避免旧状态条残留
     for off in base..base + COLS * 3 {
-        vga_write(off, BLACK | 0x20);
+        text_clear_cell(off);
     }
     for off in base..base + COLS {
-        vga_write(off, BLACK | 0x20);
+        text_clear_cell(off);
     }
     // 候选行(黑底白字,左右各留 1 列黑)
     let mut off = base + COLS + 1;
-    vga_write(base + COLS, BLACK | 0x20);
+    text_clear_cell(base + COLS);
     for i in 0..cn {
         if i > 0 {
-            vga_write(off, (ATTR as u16) << 8 | b' ' as u16);
+            text_put_cell(off, b' ', ATTR);
             off += 1;
         }
         let d = (b'1' + i as u8) as u16;
-        vga_write(off, (ATTR as u16) << 8 | d);
+        text_put_cell(off, d as u8, ATTR);
         off += 1;
-        vga_write(off, (ATTR as u16) << 8 | b':' as u16);
+        text_put_cell(off, b':', ATTR);
         off += 1;
         let gb = unsafe { IME_CAND[i] };
-        let slot = unsafe { SLOT_NEXT };
-        if slot < 64 {
-            unsafe {
-                SLOT_NEXT = slot + 1;
-            }
-            let c0 = 0x80 + slot * 2;
-            let c1 = c0 + 1;
-            if let Some(g) = hzk_glyph(gb) {
-                let mut left = [0u8; 16];
-                let mut right = [0u8; 16];
-                for k in 0..16 {
-                    left[k] = g[k * 2];
-                    right[k] = g[k * 2 + 1];
-                }
-                font_upload(c0, &left);
-                font_upload(c1, &right);
-                vga_write(off, (ATTR as u16) << 8 | c0 as u16);
-                vga_write(off + 1, (ATTR as u16) << 8 | c1 as u16);
-            }
-            off += 2;
-        }
+        text_put_gb(off, gb, ATTR);
+        off += 2;
     }
-    vga_write(off, BLACK | 0x20);
+    text_clear_cell(off);
     for off in (y + 2) * COLS..(y + 3) * COLS {
-        vga_write(off, BLACK | 0x20);
+        text_clear_cell(off);
     }
     unsafe {
         IME_CAND_ROW = y;
@@ -668,7 +729,7 @@ fn ime_status(vga: &Vga) {
     let y = if vga.row + 1 <= ROWS - 3 { vga.row + 1 } else { ROWS - 3 };
     let base = y * COLS;
     for off in base..base + COLS * 2 {
-        vga_write(off, BLACK | 0x20);
+        text_clear_cell(off);
     }
     let msg: &[u8] = if unsafe { IME_CN } {
         b"  [Chinese IME]  (a-z pinyin, 1-9 pick, Esc clear, Ctrl+Space toggle)"
@@ -677,7 +738,7 @@ fn ime_status(vga: &Vga) {
     };
     let mut off = base + COLS;
     for &b in msg {
-        vga_write(off, (ATTR as u16) << 8 | b as u16);
+        text_put_cell(off, b, ATTR);
         off += 1;
     }
     unsafe {
@@ -2162,12 +2223,15 @@ fn setup_paging() {
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     setup_paging();
+    fb::init(mb2_info);
     com1_init();
     #[cfg(feature = "klog")]
     unsafe {
         klog_init();
     }
-    font_init();
+    if !fb::active() {
+        font_init();
+    }
     fs::init();
     numa::init(mb2_info);
     idt::init();
@@ -2197,7 +2261,10 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
         }
     });
     acpi::acpi_log();
-    log!("VGA text mode + HZK16 font ready, COM1 ready");
+    log!(
+        "{} ready, COM1 ready",
+        if fb::active() { "framebuffer console + HZK16" } else { "VGA text mode + HZK16 font" }
+    );
     log!("rootfs: {} nodes mounted", fs::node_count());
     log!("numa: {} nodes", numa::node_count());
 
