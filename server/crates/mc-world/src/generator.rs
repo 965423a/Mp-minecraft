@@ -1,5 +1,9 @@
 //! 地形生成器:超平坦与正常地形(确定性:同种子同区块 → 完全一致)。
 
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::blocks::*;
 use crate::chunk::{Chunk, MAX_Y, MIN_Y, SEA_LEVEL};
 use crate::noise::Noise;
@@ -121,7 +125,7 @@ impl WorldGenerator {
         } else {
             SEA_LEVEL as f64 + (land_factor - 0.40) * 260.0 + hills * 60.0
         };
-        ((base + detail * 3.0).round() as i32).clamp(MIN_Y + 2, MAX_Y - 30)
+        (libm::round(base + detail * 3.0) as i32).clamp(MIN_Y + 2, MAX_Y - 30)
     }
 
     fn is_solid_surface(id: u16) -> bool {

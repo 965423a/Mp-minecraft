@@ -148,6 +148,9 @@ fn dump(fr: &Frame) {
         );
     }
     unsafe {
+        crate::sched::dump_tasks();
+    }
+    unsafe {
         asm!("cli");
     }
 }

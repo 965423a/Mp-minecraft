@@ -24,6 +24,7 @@ unsafe extern "C" {
     static tramp_start: u8;
     static tramp_end: u8;
     static gdt_desc: u8;
+    fn enable_sse_ap();
 }
 
 static mut AP_STACKS: [[u8; AP_STACK_SIZE]; 64] = [[0; AP_STACK_SIZE]; 64];
@@ -220,6 +221,10 @@ pub static AP_STRESS_FAILS: [core::sync::atomic::AtomicU64; 64] = [const { core:
 
 pub extern "C" fn ap_entry(ap_id: u32) -> ! {
     let apic = 0xFEE0_0000u64;
+    // 开启 SSE(OSFXSR | OSXMMEXCPT),与 BSP 一致;AP 上允许浮点代码(世界生成)
+    unsafe {
+        enable_sse_ap();
+    }
 unsafe {
         (apic as *mut u32).add(0xF0 / 4).write_volatile(0x1FF); // SVR 使能 LAPIC
         (apic as *mut u32).add(0x350 / 4).write_volatile(0x100FF); // LVT0 屏蔽(vector 0xFF)

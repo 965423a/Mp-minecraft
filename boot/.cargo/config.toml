@@ -2,4 +2,4 @@
 target = "x86_64-unknown-none"
 
 [target.x86_64-unknown-none]
-rustflags = ["-C", "target-feature=-soft-float,+sse,+sse2"]
+rustflags = ["-C", "target-feature=-soft-float,+sse,+sse2", "-C", "relocation-model=static"]

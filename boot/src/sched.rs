@@ -192,6 +192,7 @@ pub fn on_tick(fr: *mut Frame) {
                 Some(n) => {
                     next = Some(n);
                     nsp = unsafe { (*tasks().add(n as usize)).sp };
+                    check_nsp(n, nsp, "task");
                     break;
                 }
                 None => break,
@@ -239,6 +240,7 @@ pub fn on_tick(fr: *mut Frame) {
                 Some(n) => {
                     next = Some(n);
                     nsp = unsafe { (*tasks().add(n as usize)).sp };
+                    check_nsp(n, nsp, "idle");
                     break;
                 }
                 None => break,
@@ -266,11 +268,40 @@ unsafe extern "C" {
 }
 
 /// 检查目标帧有效性:rip 为零说明帧被破坏,打印现场后停机。
+/// 打印任务表(崩溃诊断用)。
+pub fn dump_tasks() {
+    unsafe {
+        let tbase = tasks();
+        for i in 0..MAX_TASKS {
+            let x = &*tbase.add(i);
+            if x.stack != 0 {
+                crate::log!(
+                    "sched:   t{i}: st={:#x} sp={:#x} q={}",
+                    x.stack,
+                    x.sp,
+                    x.quantum
+                );
+            }
+        }
+    }
+}
+/// 校验切换目标帧地址是否在任务栈内,异常才打印(平时零日志)。
+fn check_nsp(n: u32, nsp: u64, tag: &str) {
+    unsafe {
+        let st = (*tasks().add(n as usize)).stack;
+        if st != 0 && (nsp < st || nsp >= st + (STACK_PAGES * 4096) as u64) {
+            crate::log!(
+                "sched: BAD NSP {tag} task={n} stack={st:#x} sp={nsp:#x}"
+            );
+        }
+    }
+}
+
 fn check_frame(sp: u64, tag: &str) {
     unsafe {
         let fr = sp as *const Frame;
         let f = &*fr;
-        if f.rip == 0 {
+        if f.rip == 0 || f.rip < 0x100000 || f.cs != 0x18 || f.ss != 0x10 {
             let cpu = crate::idt::lapic_id() as usize;
             crate::log!(
                 "sched: BAD FRAME {tag} sp={sp:#x} cpu{cpu} CUR={:#x} IDLE_SP={:#x} rip=0 cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} err={:#x} vec={:#x}",
@@ -283,9 +314,42 @@ fn check_frame(sp: u64, tag: &str) {
                 f.err,
                 f.vec
             );
-            let tasks = tasks();
+            let p = sp as *const u64;
+            let p = sp as *const u64;
+            crate::log!(
+                "sched:   frm: {:x} {:x} {:x} {:x} | {:x} {:x} {:x} {:x} | {:x} {:x} {:x} {:x} | {:x} {:x} {:x} {:x}",
+                p.read_volatile(),
+                p.add(1).read_volatile(),
+                p.add(2).read_volatile(),
+                p.add(3).read_volatile(),
+                p.add(4).read_volatile(),
+                p.add(5).read_volatile(),
+                p.add(6).read_volatile(),
+                p.add(7).read_volatile(),
+                p.add(8).read_volatile(),
+                p.add(9).read_volatile(),
+                p.add(10).read_volatile(),
+                p.add(11).read_volatile(),
+                p.add(12).read_volatile(),
+                p.add(13).read_volatile(),
+                p.add(14).read_volatile(),
+                p.add(15).read_volatile()
+            );
+            let qp = unsafe { core::ptr::addr_of_mut!(QUEUE).cast::<u8>() as *const u32 };
+            crate::log!(
+                "sched:   q: {:x} {:x} {:x} {:x} {:x} {:x} {:x} {:x}",
+                qp.read_volatile(),
+                qp.add(1).read_volatile(),
+                qp.add(2).read_volatile(),
+                qp.add(3).read_volatile(),
+                qp.add(4).read_volatile(),
+                qp.add(5).read_volatile(),
+                qp.add(6).read_volatile(),
+                qp.add(7).read_volatile()
+            );
+            let tbase = tasks();
             for i in 0..MAX_TASKS {
-                let t = &*tasks.add(i);
+                let t = &*tbase.add(i);
                 if t.stack != 0 {
                     crate::log!(
                         "sched:   task{i}: stack={:#x} sp={:#x} q={}",

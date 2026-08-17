@@ -9,6 +9,9 @@ pub const MIN_Y: i32 = -64;
 pub const MAX_Y: i32 = 320;
 pub const SEA_LEVEL: i32 = 63;
 
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
 use crate::blocks::AIR;
 
 /// 一个 section(16×16×16),平面数组存储,索引 x + z*16 + y*256。
@@ -76,7 +79,7 @@ impl Section {
 pub struct Chunk {
     pub cx: i32,
     pub cz: i32,
-    sections: [Section; SECTIONS],
+    sections: Box<[Section; SECTIONS]>,
 }
 
 impl Chunk {
@@ -84,7 +87,7 @@ impl Chunk {
         Chunk {
             cx,
             cz,
-            sections: [Section::new(); SECTIONS],
+            sections: Box::new([Section::new(); SECTIONS]),
         }
     }
 
@@ -120,9 +123,8 @@ impl Chunk {
         &self.sections
     }
 
-    /// 测试用:整体替换 sections。
-    pub fn replace_sections(&mut self, sections: [Section; SECTIONS]) {
-        self.sections = sections;
+    pub fn sections_mut(&mut self) -> &mut [Section; SECTIONS] {
+        &mut self.sections
     }
 
     pub fn section(&self, i: usize) -> &Section {
