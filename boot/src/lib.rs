@@ -454,6 +454,14 @@ unsafe extern "C" {
     pub fn kerr(code: i32, what: *const u8, a: u64, b: u64, c: u64);
 }
 
+/// 无 klog 构建(nolog 版本):未处理中断 dump 退化为串口标记。
+#[cfg(not(feature = "klog"))]
+pub unsafe fn kerr(_code: i32, _what: *const u8, _a: u64, _b: u64, _c: u64) {
+    unsafe {
+        core::arch::asm!("mov dx, 0x3f8; mov al, 0x4b; out dx, al", options(nomem, nostack));
+    }
+}
+
 // ---------------- PS/2 键盘 ----------------
 
 /// 轮询读键盘扫描码(0x60)。
