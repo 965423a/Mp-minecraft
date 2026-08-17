@@ -81,6 +81,13 @@
   打包位数),switch 列版本/切换;status 响应与区块打包按当前版本
   参数化;验证 1.12.2(proto=340,maxY=128)↔ 26.2(proto=776,maxY=384)。
 
+- 内置数据库:MySQL(mysqld.service)与 MariaDB(mariadb.service)
+  双实例,均可用 systemctl start/stop/status 管理;SQL 引擎
+  (CREATE/DROP/SHOW/INSERT/SELECT/WHERE/AND/LIMIT/COUNT/UPDATE/
+  DELETE,INT/DOUBLE/TEXT,跨类型比较);sql mysql|mariadb <stmt>
+  执行,dbiso 验证实例隔离(ok),dbtest 双实例 CRUD 自检;
+  QEMU 三服务(mc-server+mysqld+mariadb)90s 同跑 ud=0 bad=0。
+
 ## 决策记录(已定案)
 
 - 语言:Rust 主体 + C 热路径(varint/位打包/NBT),内核入口汇编最小必要。
