@@ -5,6 +5,13 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 source "$HOME/.cargo/env"
 
+# 版本化产物:ISO 名 = mcs-<版本>.iso(版本取 VERSION 环境变量,否则取 git 描述)。
+# 本地打包与 GitHub Release 资产统一用同名文件。
+VERSION="${VERSION:-$(git describe --tags --always 2>/dev/null || echo dev)}"
+ISO_NAME="mcs-${VERSION}.iso"
+ISO="$ROOT/dist/$ISO_NAME"
+DEST_DIR="${DEST_DIR:-/mnt/d}"
+
 echo "==> [1/4] cargo build (server)"
 cargo build --manifest-path "$ROOT/server/Cargo.toml" --release
 
@@ -32,6 +39,14 @@ mkdir -p "$ISO_ROOT/boot/grub/fonts"
 cp /usr/share/grub/unicode.pf2 "$ISO_ROOT/boot/grub/fonts/unicode.pf2" 2>/dev/null || true
 
 echo "==> [4/4] mkisofs (grub-mkrescue)"
-grub-mkrescue -o "$ROOT/dist/mcs.iso" "$ISO_ROOT" -- -volid MCS -padding 0 2>&1 | tail -2
-echo "==> ISO ready: $ROOT/dist/mcs.iso (BIOS + UEFI hybrid)"
-ls -lh "$ROOT/dist/mcs.iso"
+grub-mkrescue -o "$ISO" "$ISO_ROOT" -- -volid MCS -padding 0 2>&1 | tail -2
+echo "==> ISO ready: $ISO (BIOS + UEFI hybrid)"
+ls -lh "$ISO"
+
+# 拷贝到 Windows D 盘(与本地 dist 同名)
+if [ -d "$DEST_DIR" ] && [ -w "$DEST_DIR" ]; then
+    cp -f "$ISO" "$DEST_DIR/$ISO_NAME"
+    echo "==> copied to $DEST_DIR/$ISO_NAME"
+else
+    echo "==> WARNING: $DEST_DIR not writable, skip D: copy"
+fi
