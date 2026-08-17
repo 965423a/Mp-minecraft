@@ -25,7 +25,7 @@ grub-mkimage -O x86_64-efi \
     -o "$ISO_ROOT/EFI/BOOT/BOOTX64.EFI" \
     -p /boot/grub \
     iso9660 serial terminal normal configfile search search_fs_file \
-    test echo ls cat multiboot2 \
+    test echo ls cat multiboot2 videoinfo \
     video video_fb gfxterm font all_video efi_gop \
     part_msdos part_gpt fat ext2
 mkdir -p "$ISO_ROOT/boot/grub/fonts"
