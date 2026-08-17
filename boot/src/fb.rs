@@ -29,6 +29,7 @@ pub fn info() -> Option<FbInfo> {
 /// 解析 multiboot2 framebuffer tag(type 8),找到则启用。
 pub fn init(mb2_info: *const u8) {
     if mb2_info.is_null() {
+        crate::log!("fb: no multiboot2 info, VGA text fallback");
         return;
     }
     let total = unsafe { *(mb2_info as *const u32) };
@@ -62,9 +63,16 @@ pub fn init(mb2_info: *const u8) {
                 );
                 return;
             }
+            crate::log!(
+                "fb: framebuffer tag found but unusable (addr={:#x} type={}, bpp={})",
+                addr,
+                ftype,
+                bpp
+            );
         }
         pos += (size + 7) & !7;
     }
+    crate::log!("fb: no framebuffer tag in mb2 (VGA text fallback; invisible on UEFI-only platforms)");
 }
 
 const FG: u32 = 0xD0D0D0;

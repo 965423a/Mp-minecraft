@@ -26,7 +26,7 @@ grub-mkimage -O x86_64-efi \
     -p /boot/grub \
     iso9660 serial terminal normal configfile search search_fs_file \
     test echo ls cat multiboot2 \
-    video video_fb gfxterm font all_video \
+    video video_fb gfxterm font all_video efi_gop \
     part_msdos part_gpt fat ext2
 mkdir -p "$ISO_ROOT/boot/grub/fonts"
 cp /usr/share/grub/unicode.pf2 "$ISO_ROOT/boot/grub/fonts/unicode.pf2" 2>/dev/null || true
