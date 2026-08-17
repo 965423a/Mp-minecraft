@@ -14,6 +14,7 @@ mod kalloc;
 mod fs;
 mod idt;
 mod kb;
+mod tui;
 mod numa;
 mod sched;
 mod smp;
@@ -2431,8 +2432,9 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     log!("rootfs: {} nodes mounted", fs::node_count());
     log!("numa: {} nodes", numa::node_count());
 
-    // EULA 第一步
-    let accepted = eula_prompt(&mut vga);
+    // archinstall 风格安装向导(中文 TUI;无输入设备时全自动走完)
+    let accepted = tui::install_wizard(&mut vga);
+    log!("wizard: complete, entering system shell (eula={})", accepted);
 
     vga.clear();
     vga.set_cursor(2, 0);
