@@ -8,6 +8,7 @@ extern crate alloc;
 mod acpi;
 mod emb;
 mod mcver;
+mod sqldb;
 mod kalloc;
 mod fs;
 mod idt;
@@ -974,6 +975,9 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                 let _ = writeln!(vga, "    genworld    parallel world generation test");
                 let _ = writeln!(vga, "    pkt         protocol pipeline check (varint/status/chunk)");
                 let _ = writeln!(vga, "    switch      list/switch MC server version (1.0 .. 26.2)");
+                let _ = writeln!(vga, "    sql         execute SQL on mysqld/mariadb (sql mysql|mariadb <stmt>)");
+                let _ = writeln!(vga, "    dbtest      database engine self-test (CRUD)");
+                let _ = writeln!(vga, "    dbiso       mysql/mariadb instance isolation check");
                 let _ = writeln!(vga, "    uptime      system uptime");
                 let _ = writeln!(vga, "    stats       scheduler statistics");
                 let _ = writeln!(vga, "    ver         version info");
@@ -1036,6 +1040,71 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                     sw,
                     idt::tick_total()
                 );
+            }
+            b"dbiso" => {
+                let _ = writeln!(vga, "  == instance isolation check ==");
+                let out = sqldb::execute(
+                    sqldb::mysql(),
+                    "create table isoprobe (id int)",
+                );
+                for line in out.lines() {
+                    let _ = writeln!(vga, "{line}");
+                    crate::log!("sql: {line}");
+                }
+                let ok = sqldb::isolation_ok();
+                let _ = writeln!(
+                    vga,
+                    "  isolation: {} (mysql has isoprobe, mariadb clean)",
+                    if ok { "ok" } else { "FAIL" }
+                );
+                crate::log!("dbiso: isolation {}", if ok { "ok" } else { "FAIL" });
+                let out = sqldb::execute(sqldb::mysql(), "drop table isoprobe");
+                for line in out.lines() {
+                    let _ = writeln!(vga, "{line}");
+                    crate::log!("sql: {line}");
+                }
+            }
+            b"dbtest" => {
+                let _ = writeln!(vga, "  == mysqld selftest ==");
+                let out = sqldb::selftest(sqldb::mysql());
+                for line in out.lines() {
+                    let _ = writeln!(vga, "{line}");
+                    crate::log!("sql: {line}");
+                }
+                let _ = writeln!(vga, "  == mariadb selftest ==");
+                let out = sqldb::selftest(sqldb::mariadb());
+                for line in out.lines() {
+                    let _ = writeln!(vga, "{line}");
+                    crate::log!("sql: {line}");
+                }
+            }
+            b"sql" => {
+                let rest = trim_space(rest);
+                let (db, stmt) = if rest.starts_with(b"mysql ") {
+                    (sqldb::mysql(), core::str::from_utf8(trim_space(&rest[6..])).unwrap_or(""))
+                } else if rest.starts_with(b"mariadb ") {
+                    (
+                        sqldb::mariadb(),
+                        core::str::from_utf8(trim_space(&rest[8..])).unwrap_or(""),
+                    )
+                } else {
+                    (sqldb::mysql(), core::str::from_utf8(rest).unwrap_or(""))
+                };
+                let which = if core::ptr::eq(db, sqldb::mariadb()) { "mariadb" } else { "mysql" };
+                if !sqldb::server_running(db) {
+                    let _ = writeln!(
+                        vga,
+                        "  sql: {which} server is not running (systemctl start {which}ld)"
+                    );
+                    crate::log!("sql: refused, {which} not running");
+                } else {
+                    let out = sqldb::execute(db, stmt);
+                    for line in out.lines() {
+                        let _ = writeln!(vga, "{line}");
+                        crate::log!("sql: {line}");
+                    }
+                    crate::log!("sql[{which}]: executed '{}'", stmt);
+                }
             }
             b"switch" => {
                 if rest.is_empty() {
@@ -1286,6 +1355,8 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
 /// 服务单元表。
 const UNITS: &[(&[u8], &[u8])] = &[
     (b"mc-server.service", b"Mp-minecraft server (0.0.0.0:25565)"),
+    (b"mysqld.service", b"MySQL in-kernel SQL server (127.0.0.1:3306)"),
+    (b"mariadb.service", b"MariaDB in-kernel SQL server (127.0.0.1:3307)"),
     (b"console.service", b"server console interface (ctrls)"),
 ];
 
@@ -1325,11 +1396,22 @@ fn systemctl(vga: &mut Vga, args: &[u8]) {
     match sub {
         b"status" => {
             let (running, made) = emb::server_stats();
+            let db = sqldb::mysql();
+            let dbrun = sqldb::server_running(db);
+            let mrun = sqldb::server_running(sqldb::mariadb());
             let unit = trim_space(unit);
             if unit.is_empty() {
                 let _ = writeln!(vga, "  systemctl status: showing all units");
                 for (name, _) in UNITS {
-                    let r = running && *name == b"mc-server.service";
+                    let r = if *name == b"mc-server.service" {
+                        running
+                    } else if *name == b"mysqld.service" {
+                        dbrun
+                    } else if *name == b"mariadb.service" {
+                        mrun
+                    } else {
+                        false
+                    };
                     let _ = writeln!(
                         vga,
                         "    {}  {}",
@@ -1340,6 +1422,35 @@ fn systemctl(vga: &mut Vga, args: &[u8]) {
                 if running {
                     let _ = writeln!(vga, "    mc-server.service: {made} chunks generated so far");
                 }
+                if dbrun {
+                    let _ = writeln!(
+                        vga,
+                        "    mysqld.service: {} queries executed",
+                        sqldb::query_count(sqldb::mysql())
+                    );
+                }
+                if mrun {
+                    let _ = writeln!(
+                        vga,
+                        "    mariadb.service: {} queries executed",
+                        sqldb::query_count(sqldb::mariadb())
+                    );
+                }
+                crate::log!(
+                    "systemctl: status mc={running} mysql={dbrun} mariadb={mrun} chunks={made}"
+                );
+            } else if unit_matches(unit, b"mysqld.service") {
+                unit_status(vga, unit, dbrun);
+                crate::log!(
+                    "systemctl: status {unit:?} running={dbrun} queries={}",
+                    sqldb::query_count(sqldb::mysql())
+                );
+            } else if unit_matches(unit, b"mariadb.service") {
+                unit_status(vga, unit, mrun);
+                crate::log!(
+                    "systemctl: status {unit:?} running={mrun} queries={}",
+                    sqldb::query_count(sqldb::mariadb())
+                );
             } else {
                 unit_status(vga, unit, running);
                 crate::log!(
@@ -1379,6 +1490,28 @@ fn systemctl(vga: &mut Vga, args: &[u8]) {
                 } else {
                     let _ = writeln!(vga, "  mc-server.service failed to start (task table full?)");
                 }
+            } else if unit_matches(unit, b"mysqld.service") {
+                let db = sqldb::mysql();
+                if sqldb::server_running(db) {
+                    let _ = writeln!(vga, "  mysqld.service already running");
+                } else {
+                    sqldb::server_start(db);
+                    crate::log!("systemctl: mysqld.service started");
+                    let _ = writeln!(vga, "  starting mysqld.service ...");
+                    let _ = writeln!(vga, "  [mysql] server listening on 127.0.0.1:3306");
+                    let _ = writeln!(vga, "  [mysql] use 'sql mysql <statement>' to execute queries");
+                }
+            } else if unit_matches(unit, b"mariadb.service") {
+                let db = sqldb::mariadb();
+                if sqldb::server_running(db) {
+                    let _ = writeln!(vga, "  mariadb.service already running");
+                } else {
+                    sqldb::server_start(db);
+                    crate::log!("systemctl: mariadb.service started");
+                    let _ = writeln!(vga, "  starting mariadb.service ...");
+                    let _ = writeln!(vga, "  [mariadb] server listening on 127.0.0.1:3307");
+                    let _ = writeln!(vga, "  [mariadb] use 'sql mariadb <statement>' to execute queries");
+                }
             } else if unit_matches(unit, b"console.service") {
                 let _ = writeln!(vga, "  console.service: use 'ctrls' to attach");
             } else {
@@ -1396,6 +1529,24 @@ fn systemctl(vga: &mut Vga, args: &[u8]) {
                     let _ = writeln!(vga, "  [server] stopped");
                 } else {
                     let _ = writeln!(vga, "  mc-server.service is not running");
+                }
+            } else if unit_matches(unit, b"mysqld.service") {
+                let db = sqldb::mysql();
+                if sqldb::server_running(db) {
+                    sqldb::server_stop(db);
+                    let _ = writeln!(vga, "  stopping mysqld.service ...");
+                    let _ = writeln!(vga, "  [mysql] server stopped");
+                } else {
+                    let _ = writeln!(vga, "  mysqld.service is not running");
+                }
+            } else if unit_matches(unit, b"mariadb.service") {
+                let db = sqldb::mariadb();
+                if sqldb::server_running(db) {
+                    sqldb::server_stop(db);
+                    let _ = writeln!(vga, "  stopping mariadb.service ...");
+                    let _ = writeln!(vga, "  [mariadb] server stopped");
+                } else {
+                    let _ = writeln!(vga, "  mariadb.service is not running");
                 }
             } else if unit.is_empty() {
                 let _ = writeln!(vga, "  systemctl: stop requires a unit");
