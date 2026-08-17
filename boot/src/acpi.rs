@@ -7,6 +7,63 @@ use crate::log;
 pub const SRAT_SIG: &[u8; 4] = b"SRAT";
 pub const SLIT_SIG: &[u8; 4] = b"SLIT";
 pub const MADT_SIG: &[u8; 4] = b"APIC";
+pub const FADT_SIG: &[u8; 4] = b"FACP";
+
+/// FADT 的 PM timer 端口(供 PIT 缺失时校准 TSC)。
+/// 优先 X_PM_TMR_BLK GAS(FADT offset 206,ACPI 2.0+),否则 legacy PM_TMR_BLK(offset 74)。
+pub fn fadt_pm_tmr() -> Option<u32> {
+    unsafe {
+        let t = find_table(FADT_SIG)?;
+        let len = core::ptr::read_volatile((t as *const u8).add(4)) as usize;
+        if len >= 218 {
+            let space = core::ptr::read_volatile((t as *const u8).add(206));
+            let addr = core::ptr::read_volatile((t as *const u8).add(210) as *const u64);
+            if space == 1 && addr != 0 && addr < 0x10000 {
+                return Some(addr as u32);
+            }
+        }
+        let port = core::ptr::read_volatile((t as *const u8).add(74) as *const u32);
+        if port != 0 && port < 0x10000 {
+            Some(port)
+        } else {
+            None
+        }
+    }
+}
+
+/// FADT 的 RESET 寄存器 GAS + reset value(供 reboot 链第一环)。
+/// GAS @ offset 114(space_id, bit_width, bit_offset, access, addr u64),
+/// reset value @ offset 126。
+pub fn fadt_reset() -> Option<(u16, u8)> {
+    unsafe {
+        let t = find_table(FADT_SIG)?;
+        let len = core::ptr::read_volatile((t as *const u8).add(4)) as usize;
+        if len < 128 {
+            return None;
+        }
+        let space = core::ptr::read_volatile((t as *const u8).add(114));
+        let addr = core::ptr::read_volatile((t as *const u8).add(118) as *const u64);
+        let val = core::ptr::read_volatile((t as *const u8).add(126));
+        if addr != 0 && addr < 0x10000 {
+            Some((addr as u16, val))
+        } else {
+            None
+        }
+    }
+}
+
+/// multiboot2 info 指针(kernel_main 注入,RSDP 的 EFI 来源用)。
+static mut MB2_INFO: *const u8 = core::ptr::null();
+
+pub fn set_mb2(info: *const u8) {
+    unsafe {
+        MB2_INFO = info;
+    }
+}
+
+fn mb2_info() -> *const u8 {
+    unsafe { core::ptr::addr_of!(MB2_INFO).read() }
+}
 
 #[repr(C)]
 struct Rsdp {
@@ -44,8 +101,13 @@ fn checksum(data: &[u8]) -> bool {
 }
 
 /// 扫描 [0xE0000, 0xFFFFF) 与 EBDA 找 RSDP。返回 xdt 地址与是否为 XSDT。
+/// 顺序:① EFI system table 的 ACPI 2.0 config 项(纯 UEFI 平台如 Hyper-V Gen2)
+///      ② 传统内存扫描(BIOS/CSM 平台)。
 fn rsdp_find() -> Option<(u64, bool)> {
     unsafe {
+        if let Some(xsdt) = rsdp_efi() {
+            return Some((xsdt, true));
+        }
         // EBDA 段地址在 0x40:0x0E(BIOS 数据区)
         let ebda_seg = core::ptr::read_volatile(0x40Eu16 as *const u16);
         let ebda = (ebda_seg as u64) << 4;
@@ -76,6 +138,68 @@ fn rsdp_find() -> Option<(u64, bool)> {
         }
     }
     None
+}
+
+/// multiboot2 tag type 9:EFI System Table(64 位)。返回其地址。
+/// 从 EFI config table 找 ACPI 2.0 GUID(0x8868E871-...),返回 XSDT 地址。
+/// 所有读均带范围检查,地址非法(>16GiB 映射区)直接放弃。
+fn rsdp_efi() -> Option<u64> {
+    unsafe {
+        let info = mb2_info();
+        if info.is_null() {
+            return None;
+        }
+        let total = core::ptr::read_volatile(info as *const u32);
+        if total < 16 || total > 0x100000 {
+            return None;
+        }
+        let mut off = 16u64; // 跳过 total_size + reserved
+        while off + 8 <= total as u64 {
+            let tag = (info as u64 + off) as *const u8;
+            let ttype = core::ptr::read_volatile(tag as *const u32);
+            let tsize = core::ptr::read_volatile((tag as *const u32).add(1));
+            if tsize < 8 || tsize as u64 > total as u64 - off {
+                return None;
+            }
+            if ttype == 0 {
+                return None; // 结束 tag
+            }
+            if ttype == 9 {
+                let efi_st = core::ptr::read_volatile((tag.add(8)) as *const u64);
+                if efi_st == 0 || efi_st >= 0x4_0000_0000 {
+                    return None;
+                }
+                if core::ptr::read_volatile(efi_st as *const u64) != 0x5453595320494249 {
+                    return None; // 签名 "IBI SYST" 不对
+                }
+                let n = core::ptr::read_volatile((efi_st + 80) as *const u64);
+                let ct = core::ptr::read_volatile((efi_st + 88) as *const u64);
+                if n == 0 || n > 64 || ct == 0 || ct >= 0x4_0000_0000 {
+                    return None;
+                }
+                // EFI_ACPI_20_TABLE_GUID {8868E871-E4F1-4D09-93DA-1C8D3E0E8F4A}
+                let guid: [u8; 16] = [
+                    0x71, 0xE8, 0x68, 0x88, 0xF1, 0xE4, 0x09, 0x4D, 0x93, 0xDA, 0x1C, 0x8D,
+                    0x3E, 0x0E, 0x8F, 0x4A,
+                ];
+                for i in 0..n {
+                    let e = ct + i * 24;
+                    if e >= 0x4_0000_0000 {
+                        return None;
+                    }
+                    let g = core::slice::from_raw_parts(e as *const u8, 16);
+                    if &g[..] == &guid[..] {
+                        let xsdt = core::ptr::read_volatile((e + 16) as *const u64);
+                        if xsdt != 0 && xsdt < 0x4_0000_0000 {
+                            return Some(xsdt);
+                        }
+                    }
+                }
+            }
+            off += tsize as u64;
+        }
+        None
+    }
 }
 
 /// 在 RSDT/XSDT 中找签名表。返回表指针。

@@ -20,12 +20,16 @@ cp "$ROOT/sysroot/boot/grub/grub.cfg" "$ISO_ROOT/boot/grub/grub.cfg"
 cp "$ROOT/server/target/release/mc-server" "$ISO_ROOT/boot/mc-server" 2>/dev/null || true
 
 # UEFI 可执行文件:让 Rufus/固件能直接识别 ISO 的 UEFI 支持
+# 必须带 video/gfxterm/font,gfxpayload 才能保留 GOP framebuffer 传给内核
 grub-mkimage -O x86_64-efi \
     -o "$ISO_ROOT/EFI/BOOT/BOOTX64.EFI" \
     -p /boot/grub \
     iso9660 serial terminal normal configfile search search_fs_file \
-    test echo ls cat multiboot2 efi_gop efi_uga efi_console \
-    part_msdos part_gpt fat ext2 2>/dev/null || true
+    test echo ls cat multiboot2 \
+    video video_fb gfxterm font all_video \
+    part_msdos part_gpt fat ext2
+mkdir -p "$ISO_ROOT/boot/grub/fonts"
+cp /usr/share/grub/unicode.pf2 "$ISO_ROOT/boot/grub/fonts/unicode.pf2" 2>/dev/null || true
 
 echo "==> [4/4] mkisofs (grub-mkrescue)"
 grub-mkrescue -o "$ROOT/dist/mcs.iso" "$ISO_ROOT" -- -volid MCS -padding 0 2>&1 | tail -2

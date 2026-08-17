@@ -4,7 +4,6 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 const TRAMP_DST: u64 = 0x7000;
-const ICR: u64 = 0x300;
 const AP_STACK_SIZE: usize = 16384;
 // tramp.S 内偏移(tramp_start 起,编译后 xxd 校准):
 const PARAM_OFF: u64 = 0x100; // 参数区起点(与 tramp.S .set PARAM 一致)
@@ -65,8 +64,9 @@ fn cr3_value() -> u64 {
     v
 }
 
-/// 用 PIT 通道 0 校准 TSC 频率,返回 ticks/us。
-pub fn tsc_per_us() -> u64 {
+/// 用 PIT 通道 0 校准 TSC 频率,返回 ticks/us。无 PIT 时返回 0。
+/// 调用方需回退到 PM timer(纯 UEFI 平台无 PIT)。
+fn tsc_per_us_pit() -> u64 {
     unsafe {
         // mode 2,初值 65536(~54.9ms 满周期)
         outb(0x43, 0x34);
@@ -84,14 +84,75 @@ pub fn tsc_per_us() -> u64 {
             }
         }
         let t1 = rdtsc();
+        if cnt >= 32768 {
+            return 0; // 计数未动:0x40 读回 0xFF(无 PIT)
+        }
         let half_us = 27_500u64; // 半计数窗口 ≈ 27.5ms
         let per_us = (t1 - t0) / half_us;
         if per_us < 100 || per_us > 100_000 {
-            2500
+            0
         } else {
             per_us
         }
     }
+}
+
+fn inl(port: u32) -> u32 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        asm!("in eax, dx", in("dx") port as u16, out("eax") lo, options(nomem, nostack));
+        asm!("in eax, dx", in("dx") (port + 2) as u16, out("eax") hi, options(nomem, nostack));
+    }
+    lo | (hi << 16)
+}
+
+/// PM timer(3.579545MHz)校准 TSC。返回 ticks/us;不可用返回 0。
+fn tsc_per_us_pm() -> u64 {
+    let Some(port) = crate::acpi::fadt_pm_tmr() else {
+        return 0;
+    };
+    unsafe {
+        let t0 = rdtsc();
+        let v0 = inl(port) & 0xFF_FFFF;
+        let mut v = v0;
+        while v == v0 {
+            v = inl(port) & 0xFF_FFFF;
+        }
+        let t1 = rdtsc();
+        let dt = v.wrapping_sub(v0) & 0xFF_FFFF;
+        if dt < 300 {
+            return 0; // 计数器未动(24 位折返太近,重试意义不大)
+        }
+        let dt_us = (dt as u64) * 1_000_000 / 3_579_545;
+        let per_us = (t1 - t0) / dt_us;
+        if per_us >= 100 && per_us <= 100_000 {
+            per_us
+        } else {
+            0
+        }
+    }
+}
+
+/// TSC ticks/us:PIT → PM timer → 2500 兜底。
+pub fn tsc_per_us() -> u64 {
+    let pit = tsc_per_us_pit();
+    if pit != 0 {
+        return pit;
+    }
+    if let Some(pm) = Some(tsc_per_us_pm()) {
+        if pm != 0 {
+            crate::log!("smp: PIT absent, calibrated via PM timer: {pm} ticks/us");
+            return pm;
+        }
+    }
+    crate::log!("smp: no PIT/PM timer, using fallback 2500 ticks/us");
+    2500
+}
+
+/// 全局 TSC ticks/us(sleep 等轮询延时用)。
+pub fn tsc_per_us_global() -> u64 {
+    unsafe { TSC_PER_US }
 }
 
 fn usleep(us: u64, tpu: u64) {
@@ -102,16 +163,12 @@ fn usleep(us: u64, tpu: u64) {
 }
 
 unsafe fn apic_write(apic_base: u64, off: u64, v: u32) {
-    ((apic_base + off) as *mut u32).write_volatile(v);
+    crate::idt::apic_w(off as u32, v);
 }
 
-unsafe fn apic_read(apic_base: u64, off: u64) -> u32 {
-    ((apic_base + off) as *const u32).read_volatile()
-}
-
-fn wait_icr_ready(apic_base: u64) {
+fn wait_icr_ready() {
     for _ in 0..10_000 {
-        if unsafe { apic_read(apic_base, ICR) } & 0x1000 == 0 {
+        if !crate::idt::apic_icr_busy() {
             return;
         }
         core::hint::spin_loop();
@@ -220,21 +277,18 @@ pub static AP_STRESS: [core::sync::atomic::AtomicU64; 64] = [const { core::sync:
 pub static AP_STRESS_FAILS: [core::sync::atomic::AtomicU64; 64] = [const { core::sync::atomic::AtomicU64::new(0) }; 64];
 
 pub extern "C" fn ap_entry(ap_id: u32) -> ! {
-    let apic = 0xFEE0_0000u64;
     // 开启 SSE(OSFXSR | OSXMMEXCPT),与 BSP 一致;AP 上允许浮点代码(世界生成)
     unsafe {
         enable_sse_ap();
     }
-unsafe {
-        (apic as *mut u32).add(0xF0 / 4).write_volatile(0x1FF); // SVR 使能 LAPIC
-        (apic as *mut u32).add(0x350 / 4).write_volatile(0x100FF); // LVT0 屏蔽(vector 0xFF)
-        (apic as *mut u32).add(0x360 / 4).write_volatile(0x100FF); // LVT1 屏蔽(vector 0xFF)
-    }
+    crate::idt::apic_w(0xF0, 0x1FF); // SVR 使能 LAPIC
+    crate::idt::apic_w(0x350, 0x100FF); // LVT0 屏蔽(vector 0xFF)
+    crate::idt::apic_w(0x360, 0x100FF); // LVT1 屏蔽(vector 0xFF)
     crate::idt::local_init();
     crate::sched::register_idle();
     crate::log!("smp: AP{ap_id} entering idle loop");
     let tpu = unsafe { TSC_PER_US };
-    let lapic_id = unsafe { (apic as *mut u32).add(0x20 / 4).read_volatile() >> 24 };
+    let lapic_id = crate::idt::apic_r(0x20) >> 24;
     let node = crate::numa::node_for_lapic(lapic_id).unwrap_or(0);
     loop {
         usleep(1_000, tpu);
@@ -269,31 +323,26 @@ unsafe {
     }
 }
 
-unsafe fn wake_ap(apic_base: u64, id: u32, idx: usize, tpu: u64) -> bool {
+unsafe fn wake_ap(id: u32, idx: usize, tpu: u64) -> bool {
     crate::log!(
         "smp: icr0={:#x} icr2={:#x}",
-        apic_read(apic_base, 0x300),
-        apic_read(apic_base, 0x310)
+        crate::idt::apic_r(0x300),
+        crate::idt::apic_r(0x310)
     );
-    // 先写 ICR2(dest field),再写 ICR(低 32)触发投递
-    apic_write(apic_base, 0x310, id << 24);
     // INIT assert(level+assert)+ deassert
-    apic_write(apic_base, ICR, 0x0000C500);
-    wait_icr_ready(apic_base);
+    crate::idt::apic_icr(id, 0x0000C500);
+    wait_icr_ready();
     usleep(10_000, tpu);
-    apic_write(apic_base, 0x310, id << 24);
-    apic_write(apic_base, ICR, 0x00008500);
-    wait_icr_ready(apic_base);
+    crate::idt::apic_icr(id, 0x00008500);
+    wait_icr_ready();
     usleep(10_000, tpu); // 等 AP 完成 INIT 重置再发 SIPI,防竞态丢 SIPI
     // SIPI(vector 7 -> 0x7000),两次。delivery mode 必须 = 0b110(Start-Up),
     // 0x607 的 mode=0b000(Fixed)无效,AP 不会启动
-    apic_write(apic_base, 0x310, id << 24);
-    apic_write(apic_base, ICR, 0x00000607);
-    wait_icr_ready(apic_base);
+    crate::idt::apic_icr(id, 0x00000607);
+    wait_icr_ready();
     usleep(1_000, tpu);
-    apic_write(apic_base, 0x310, id << 24);
-    apic_write(apic_base, ICR, 0x00000607);
-    wait_icr_ready(apic_base);
+    crate::idt::apic_icr(id, 0x00000607);
+    wait_icr_ready();
     // 轮询就绪,最多 ~5s
     for _ in 0..50_000 {
         if AP_READY[idx] != 0 {
@@ -349,16 +398,16 @@ pub fn init() -> usize {
             "smp: imr0={:#x} imr1={:#x} lvt0={:#x} lvt1={:#x}",
             inb(0x21),
             inb(0xA1),
-            apic_read(apic_base, 0x350),
-            apic_read(apic_base, 0x360)
+            crate::idt::apic_r(0x350),
+            crate::idt::apic_r(0x360)
         );
         outb(0x21, 0xFF);
         outb(0xA1, 0xFF);
         mask_ioapic(); // QEMU 的 PIT(IRQ0)经 IOAPIC 以 INT=0x08 投递,8259 mask 挡不住
         // 启用本核 LAPIC(SVR),屏蔽 LVT0/LVT1,避免 QEMU 把 PIT 中断以 NMI 形式注入
-        (apic_base as *mut u32).add(0xF0 / 4).write_volatile(0x1FF);
-        (apic_base as *mut u32).add(0x350 / 4).write_volatile(0x10000);
-        (apic_base as *mut u32).add(0x360 / 4).write_volatile(0x10000);
+        crate::idt::apic_w(0xF0, 0x1FF);
+        crate::idt::apic_w(0x350, 0x10000);
+        crate::idt::apic_w(0x360, 0x10000);
         let mut online = 1usize;
         let mut ap = 0usize;
         // AP 冷启动(进入 wait-for-SIPI)比 BSP 慢,过早发 INIT/SIPI 会丢,先等它就绪
@@ -385,7 +434,7 @@ pub fn init() -> usize {
             AP_READY[ap] = 0;
             patch_tramp(gdt_limit, gdt_base, cr3v, stack, ready, ap as u32);
             crate::log!("smp: waking lapic {:#x}, stack {:#x}", id, stack);
-            if wake_ap(apic_base, id, ap, tpu) {
+            if wake_ap(id, ap, tpu) {
                 let node = crate::numa::node_for_lapic(id).unwrap_or(0);
                 crate::log!(
                     "smp: AP{} lapic {:#x} online, node {}",

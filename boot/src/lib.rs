@@ -973,6 +973,7 @@ fn read_line(vga: &mut Vga, prompt: &str, buf: &mut [u8]) -> usize {
 // ---------------- 定时与重启 ----------------
 
 fn sleep(ms: u64) {
+    let tpu = smp::tsc_per_us_global();
     unsafe {
         let (hi0, lo0): (u32, u32);
         core::arch::asm!("rdtsc", out("edx") hi0, out("eax") lo0, options(nomem));
@@ -981,7 +982,7 @@ fn sleep(ms: u64) {
             let (hi, lo): (u32, u32);
             core::arch::asm!("rdtsc", out("edx") hi, out("eax") lo, options(nomem));
             let now = ((hi as u64) << 32) | lo as u64;
-            if now.wrapping_sub(start) > ms * 2_000_000 {
+            if now.wrapping_sub(start) > ms * tpu {
                 break;
             }
             core::hint::spin_loop();
@@ -993,7 +994,20 @@ pub(crate) fn sleep_short() {
     sleep(80);
 }
 
+/// 重启链:① ACPI FADT reset 寄存器 ② 8042 复位 ③ 空 IDT triple fault。
+/// Hyper-V Gen2 / 无 8042 平台靠 ①/③ 兜底。
 fn reboot() -> ! {
+    if let Some((port, val)) = acpi::fadt_reset() {
+        unsafe {
+            core::arch::asm!(
+                "out dx, al",
+                in("dx") port,
+                in("al") val,
+                options(nostack, nomem)
+            );
+        }
+        sleep(300);
+    }
     unsafe {
         core::arch::asm!(
             "mov al, 0xFE
@@ -1001,7 +1015,17 @@ fn reboot() -> ! {
             options(nostack, nomem)
         );
     }
+    sleep(100);
+    // triple fault:加载空 IDT 后触发 #UD → #GP(双错)→ 复位
+    static mut EMPTY_IDT: [u8; 10] = [0; 10];
     unsafe {
+        let p = core::ptr::addr_of_mut!(EMPTY_IDT);
+        core::arch::asm!(
+            "cli
+             lidt [{0}]",
+            in(reg) p,
+            options(nostack, nomem)
+        );
         core::arch::asm!("ud2", options(noreturn));
     }
 }
@@ -1242,6 +1266,33 @@ static mut SERVER_RUNNING: bool = false;
 fn system_shell(vga: &mut Vga, eula: bool) -> ! {
     let _ = writeln!(vga, "");
     let _ = writeln!(vga, "  Mp-minecraft system shell. Type 'help'. Ctrl+Space: CN/EN IME");
+    // 无人值守(Hyper-V Gen2 等无 i8042):5s 无串口输入则自动启动服务器
+    let mut no_kbd = !kb::PS2_OK.load(core::sync::atomic::Ordering::Relaxed);
+    if no_kbd {
+        let _ = writeln!(
+            vga,
+            "  Headless: no PS/2 keyboard. Auto-starting server in 5s (serial input cancels)"
+        );
+        let mut idle: u64 = 0;
+        while idle < 5000 {
+            if com1_rx().is_some() {
+                no_kbd = false;
+                break;
+            }
+            sleep(5);
+            idle += 5;
+        }
+        if no_kbd {
+            let _ = writeln!(vga, "  Auto-starting server ...");
+            unsafe {
+                SERVER_RUNNING = true;
+            }
+            let _ = writeln!(vga, "  [server] loading world generator (normal terrain)");
+            let _ = writeln!(vga, "  [server] listening on 0.0.0.0:25565");
+            let _ = writeln!(vga, "  [server] Done. Welcome to Mp-minecraft!");
+            server_console(vga);
+        }
+    }
     loop {
         let mut buf = [0u8; 128];
         let n = read_line(vga, "mcs> ", &mut buf);
@@ -2223,11 +2274,15 @@ fn eula_prompt(vga: &mut Vga) -> bool {
     let _ = writeln!(vga, "   [Y] I agree to the EULA");
     let _ = writeln!(vga, "   [N] I do not agree (reboot)");
     let _ = writeln!(vga, "");
+    // 无人值守:无 PS/2 键盘时 5s 无串口输入则自动接受
+    // (Hyper-V Gen2 等平台无 i8042,可能也无配置串口)
+    let mut idle_ms: u64 = 0;
+    let no_kbd = !kb::PS2_OK.load(core::sync::atomic::Ordering::Relaxed);
     loop {
         if let Some(c) = com1_rx() {
             match c {
                 b'y' | b'Y' => {
-                    log!("EULA accepted");
+                    log!("EULA accepted (serial)");
                     let _ = writeln!(vga, "   EULA accepted.");
                     sleep_short();
                     return true;
@@ -2238,7 +2293,9 @@ fn eula_prompt(vga: &mut Vga) -> bool {
                     sleep_short();
                     reboot();
                 }
-                _ => {}
+                _ => {
+                    idle_ms = 0;
+                }
             }
         }
         if let Some(sc) = kb::pop().or_else(poll_scancode) {
@@ -2256,6 +2313,15 @@ fn eula_prompt(vga: &mut Vga) -> bool {
                     reboot();
                 }
                 _ => {}
+            }
+        }
+        if no_kbd {
+            idle_ms += 5;
+            if idle_ms >= 5000 {
+                log!("EULA: no input devices, auto-accepting");
+                let _ = writeln!(vga, "   No input device detected, auto-accepted.");
+                sleep_short();
+                return true;
             }
         }
         sleep(5);
@@ -2329,7 +2395,9 @@ pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     }
     fs::init();
     numa::init(mb2_info);
+    acpi::set_mb2(mb2_info);
     idt::init();
+    idt::apic_detect();
     kb::init();
     smp::init();
     numa::selftest();

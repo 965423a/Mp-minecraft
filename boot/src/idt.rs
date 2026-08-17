@@ -65,14 +65,116 @@ static TICK_TOTAL: AtomicU64 = AtomicU64::new(0);
 static TICKS: [AlU64; 64] = [const { AlU64(AtomicU64::new(0)) }; 64];
 static IDT_READY: AtomicBool = AtomicBool::new(false);
 
-fn apic_w(off: u32, v: u32) {
+/// x2APIC 已启用(APIC_BASE MSR bit10)。启用时所有 LAPIC 寄存器走 MSR
+/// (0x800 + MMIO 偏移/4),ICR 为 64 位 MSR 0x830。
+pub static X2APIC: AtomicBool = AtomicBool::new(false);
+
+/// 检测 x2APIC 状态(APIC_BASE MSR bit10)。不主动启用:
+/// QEMU TCG 的 x2APIC MSR 支持不完整(EOI 读会 #GP),无法靠 CPUID 可靠识别;
+/// 固件/管理程序已启用(如 Hyper-V Gen2)则走 MSR 路径,否则 MMIO 路径,
+/// 两者本内核均支持。
+pub fn apic_detect() {
+    let lo: u32;
+    let hi: u32;
     unsafe {
-        ((APIC + off as u64) as *mut u32).write_volatile(v);
+        asm!(
+            "rdmsr",
+            in("ecx") 0x1Bu32,
+            out("eax") lo,
+            out("edx") hi,
+            options(nomem, nostack)
+        );
+    }
+    let msr = ((hi as u64) << 32) | lo as u64;
+    let enabled = msr & 0x400 != 0;
+    X2APIC.store(enabled, Ordering::Relaxed);
+    crate::log!(
+        "apic: x2APIC {}",
+        if enabled { "enabled by firmware" } else { "off, using MMIO" }
+    );
+}
+
+/// LAPIC 寄存器写:MMIO 或 x2APIC MSR(0x800 + off/4)。
+/// ICR(0x300)在 x2APIC 下必须用 64 位组合写,由 apic_icr 处理。
+pub fn apic_w(off: u32, v: u32) {
+    if X2APIC.load(Ordering::Relaxed) && off != 0x300 {
+        let idx: u64 = (0x800 + off / 4) as u64;
+        unsafe {
+            asm!(
+                "wrmsr",
+                in("ecx") idx as u32,
+                in("eax") v,
+                in("edx") 0u32,
+                options(nomem, nostack)
+            );
+        }
+    } else {
+        unsafe {
+            ((APIC + off as u64) as *mut u32).write_volatile(v);
+        }
     }
 }
 
-fn apic_r(off: u32) -> u32 {
-    unsafe { ((APIC + off as u64) as *const u32).read_volatile() }
+/// LAPIC 寄存器读:MMIO 或 x2APIC MSR。
+pub fn apic_r(off: u32) -> u32 {
+    if X2APIC.load(Ordering::Relaxed) {
+        let idx: u64 = (0x800 + off / 4) as u64;
+        let lo: u32;
+        let hi: u32;
+        unsafe {
+            asm!(
+                "rdmsr",
+                in("ecx") idx as u32,
+                out("eax") lo,
+                out("edx") hi,
+                options(nomem, nostack)
+            );
+        }
+        lo
+    } else {
+        unsafe { ((APIC + off as u64) as *const u32).read_volatile() }
+    }
+}
+
+/// ICR 组合写(64 位目标):x2APIC 一次 wrmsr 0x830;MMIO 分 ICR2/ICR 两步。
+pub fn apic_icr(dest: u32, cmd: u32) {
+    if X2APIC.load(Ordering::Relaxed) {
+        let v: u64 = ((dest as u64) << 32) | cmd as u64;
+        unsafe {
+            asm!(
+                "wrmsr",
+                in("ecx") 0x830u32,
+                in("eax") v as u32,
+                in("edx") (v >> 32) as u32,
+                options(nomem, nostack)
+            );
+        }
+    } else {
+        unsafe {
+            ((APIC + 0x310u64) as *mut u32).write_volatile(dest << 24);
+            ((APIC + 0x300u64) as *mut u32).write_volatile(cmd);
+        }
+    }
+}
+
+/// ICR 忙等待(发送完成)。x2APIC 下读 MSR 0x830 的 bit12。
+pub fn apic_icr_busy() -> bool {
+    if X2APIC.load(Ordering::Relaxed) {
+        let lo: u32;
+        let hi: u32;
+        unsafe {
+            asm!(
+                "rdmsr",
+                in("ecx") 0x830u32,
+                out("eax") lo,
+                out("edx") hi,
+                options(nomem, nostack)
+            );
+        }
+        lo & 0x1000 != 0
+    } else {
+        unsafe { ((APIC + 0x300u64) as *const u32).read_volatile() & 0x1000 != 0 }
+    }
 }
 
 pub fn lapic_id() -> u32 {
