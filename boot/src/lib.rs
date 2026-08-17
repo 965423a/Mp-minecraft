@@ -447,6 +447,7 @@ macro_rules! log {
     ($($arg:tt)*) => {{}};
 }
 
+#[cfg(feature = "klog")]
 unsafe extern "C" {
     pub fn klog_init();
     pub fn klogf(level: i32, fmt: *const u8, ...);
@@ -1522,6 +1523,7 @@ fn setup_paging() {
 pub extern "C" fn kernel_main(mb2_info: *const u8) -> ! {
     setup_paging();
     com1_init();
+    #[cfg(feature = "klog")]
     unsafe {
         klog_init();
     }
