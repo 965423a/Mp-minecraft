@@ -1254,6 +1254,10 @@ fn systemctl(vga: &mut Vga, args: &[u8]) {
                 }
             } else {
                 unit_status(vga, unit, running);
+                crate::log!(
+                    "systemctl: status {unit:?} running={running} chunks={made}",
+                    made = made
+                );
             }
         }
         b"list-units" => {
