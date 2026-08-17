@@ -12,6 +12,33 @@ pub const MAX_TASKS: usize = 64;
 pub const STACK_PAGES: usize = 4;
 pub const QUANTUM: u32 = 10; // 10 个 tick = 10ms
 
+
+/// 读任务表槽(shell 诊断用)。返回 (stack, sp, quantum),空槽返回 None。
+pub fn task_info(i: usize) -> Option<(u64, u64, u32)> {
+    if i >= MAX_TASKS {
+        return None;
+    }
+    unsafe {
+        let t = &*tasks().add(i);
+        if t.stack == 0 {
+            None
+        } else {
+            Some((t.stack, t.sp, t.quantum))
+        }
+    }
+}
+
+/// 就绪队列长度(shell 诊断用)。
+pub fn queue_len() -> usize {
+    unsafe {
+        if QUEUE.tail >= QUEUE.head {
+            QUEUE.tail - QUEUE.head
+        } else {
+            MAX_TASKS - QUEUE.head + QUEUE.tail
+        }
+    }
+}
+
 const IDLE: u32 = 0xFFFF;
 const IDLE_TAG: u32 = 0x8000; // 队列中空闲核标记:IDLE_TAG | cpu
 

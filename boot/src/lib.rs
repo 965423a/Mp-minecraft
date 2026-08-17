@@ -958,6 +958,7 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                 let _ = writeln!(vga, "    ls [path]   list directory");
                 let _ = writeln!(vga, "    cat <file>  show file contents");
                 let _ = writeln!(vga, "    systemctl   service control (start/stop/status)");
+                let _ = writeln!(vga, "    tasks       kernel task table");
                 let _ = writeln!(vga, "    mem         usable memory per NUMA node");
                 let _ = writeln!(vga, "    numa        NUMA topology + local alloc test");
                 let _ = writeln!(vga, "    ver         version info");
@@ -965,6 +966,37 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                 let _ = writeln!(vga, "    install     install system (demo)");
                 let _ = writeln!(vga, "    ctrls       Minecraft server console");
                 let _ = writeln!(vga, "    reboot      restart");
+            }
+            b"tasks" => {
+                let _ = writeln!(vga, "  task table:");
+                let mut any = false;
+                for i in 0..crate::sched::MAX_TASKS {
+                    if let Some(t) = crate::sched::task_info(i) {
+                        any = true;
+                        let _ = writeln!(
+                            vga,
+                            "    [{i}] stack={:#x} sp={:#x} q={}",
+                            t.0,
+                            t.1,
+                            t.2
+                        );
+                    }
+                }
+                if !any {
+                    let _ = writeln!(vga, "    (no tasks)");
+                }
+                let _ = writeln!(
+                    vga,
+                    "    ready queue: {} entries, {} cpus online",
+                    crate::sched::queue_len(),
+                    crate::smp::cpu_count()
+                );
+                crate::sched::dump_tasks();
+                crate::log!(
+                    "tasks: queue_len={} cpus={}",
+                    crate::sched::queue_len(),
+                    crate::smp::cpu_count()
+                );
             }
             b"genworld" => {
                 let (w1, r2) = split_ascii_word(rest);
