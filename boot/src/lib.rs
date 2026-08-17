@@ -3,7 +3,11 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 mod acpi;
+mod kalloc;
+mod emb;
 mod fs;
 mod idt;
 mod kb;
@@ -12,6 +16,7 @@ mod numa;
 mod smp;
 mod spinlock;
 
+use core::alloc::{GlobalAlloc, Layout};
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 
@@ -20,6 +25,23 @@ use core::panic::PanicInfo;
 /// GB2312 16x16 点阵字库(区 16-87,每区 94 字,每字 32 字节)。
 static HZK16: &[u8] = include_bytes!("../data/hzk16.bin");
 static PINYIN_PACK: &[u8] = include_bytes!("../data/pinyin_pack.bin");
+
+#[global_allocator]
+static KALLOC: kalloc::KernelAlloc = kalloc::KernelAlloc;
+
+fn parse_dec_u64(b: &[u8]) -> Option<u64> {
+    if b.is_empty() {
+        return None;
+    }
+    let mut v: u64 = 0;
+    for c in b {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        v = v.saturating_mul(10).saturating_add((c - b'0') as u64);
+    }
+    Some(v)
+}
 
 // ---------------- 端口 I/O ----------------
 
@@ -176,7 +198,7 @@ fn screen_clear() {
 
 // ---------------- 光标定位输出 ----------------
 
-struct Vga {
+pub(crate) struct Vga {
     row: usize,
     col: usize,
 }
@@ -785,7 +807,7 @@ fn sleep(ms: u64) {
     }
 }
 
-fn sleep_short() {
+pub(crate) fn sleep_short() {
     sleep(80);
 }
 
@@ -901,6 +923,13 @@ fn system_shell(vga: &mut Vga, eula: bool) -> ! {
                 let _ = writeln!(vga, "    install     install system (demo)");
                 let _ = writeln!(vga, "    ctrls       Minecraft server console");
                 let _ = writeln!(vga, "    reboot      restart");
+            }
+            b"genworld" => {
+                let (w1, r2) = split_ascii_word(rest);
+                let (w2, _) = split_ascii_word(r2);
+                let seed = parse_dec_u64(w1).unwrap_or(0xC0FFEE);
+                let jobs = parse_dec_u64(w2).unwrap_or(32) as usize;
+                emb::cmd_genworld(vga, seed, jobs);
             }
             b"mem" => {
                 for n in 0..numa::node_count() {

@@ -84,6 +84,14 @@ long_entry:
     movq PARAM+0x34(%ebx), %rax  // AP_ENTRY u64
     jmp *%rax                    // 交给内核 AP 入口,不再 hlt
 
+    .global enable_sse_ap
+    .type enable_sse_ap, @function
+enable_sse_ap:
+    mov %cr4, %rax
+    or $0x600, %rax              // OSFXSR | OSXMMEXCPT
+    mov %rax, %cr4
+    ret
+
     .org PARAM
 params:
     .fill 0x40, 1, 0

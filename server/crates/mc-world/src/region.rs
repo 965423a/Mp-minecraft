@@ -105,7 +105,9 @@ fn parse_chunk(buf: &[u8], cx: i32, cz: i32) -> io::Result<Chunk> {
         }
         s.unpack(bits, &packed);
     }
-    chunk.replace_sections(sections);
+    for (i, sec) in sections.into_iter().enumerate() {
+        chunk.sections_mut()[i] = sec;
+    }
     Ok(chunk)
 }
 

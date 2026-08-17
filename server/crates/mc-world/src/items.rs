@@ -1,5 +1,10 @@
 //! 物品注册表 ID 表:从 items_pack.bin(原版注册表顺序)加载。
 
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 pub const PACK_BYTES: &[u8] = include_bytes!("../items_pack.bin");
 
 pub fn name_of(id: u32) -> Option<String> {

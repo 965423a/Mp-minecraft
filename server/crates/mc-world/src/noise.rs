@@ -33,8 +33,8 @@ impl Noise {
 
     /// 2D Perlin 噪声,输出范围约 [-1, 1]。
     pub fn noise2(&self, x: f64, y: f64) -> f64 {
-        let xf = x.floor();
-        let yf = y.floor();
+        let xf = libm::floor(x);
+        let yf = libm::floor(y);
         let xi = ((xf as i64) & 255) as usize;
         let yi = ((yf as i64) & 255) as usize;
         let xf = x - xf;
@@ -56,9 +56,9 @@ impl Noise {
 
     /// 3D Perlin 噪声,输出范围约 [-1, 1]。
     pub fn noise3(&self, x: f64, y: f64, z: f64) -> f64 {
-        let xf = x.floor();
-        let yf = y.floor();
-        let zf = z.floor();
+        let xf = libm::floor(x);
+        let yf = libm::floor(y);
+        let zf = libm::floor(z);
         let xi = ((xf as i64) & 255) as usize;
         let yi = ((yf as i64) & 255) as usize;
         let zi = ((zf as i64) & 255) as usize;

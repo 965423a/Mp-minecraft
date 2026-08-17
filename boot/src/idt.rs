@@ -120,9 +120,7 @@ pub fn ticks(cpu: usize) -> u64 {
 }
 
 fn dump(fr: &Frame) {
-    unsafe {
-        crate::log!("unhandled interrupt vec={} err={} rip={:#x}", fr.vec, fr.err, fr.rip);
-    }
+    crate::log!("unhandled interrupt vec={} err={} rip={:#x}", fr.vec, fr.err, fr.rip);
     crate::log!(
         "intr: vec={} err={:#x} rax={:#x} rdx={:#x} rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} lvt={:#x}",
         fr.vec,
@@ -146,6 +144,9 @@ fn dump(fr: &Frame) {
             base.add(3).read_volatile(),
             base.add(4).read_volatile()
         );
+    }
+    unsafe {
+        crate::sched::dump_tasks();
     }
     unsafe {
         asm!("cli");

@@ -1,5 +1,9 @@
 //! Chunk Data 包体编码(原版 1.21.5+ 格式,只做发送:Heightmaps + Data(sections))。
 
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::chunk::{Chunk, Section, SECTION_VOLUME};
 use crate::blocks::AIR;
 
