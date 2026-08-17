@@ -372,7 +372,7 @@ fn input_line(vga: &mut Vga, t: &Texts, buf: &mut [u8]) -> bool {
             }
             _ => {}
         }
-        sleep(5);
+        sleep(30);
     }
 }
 
@@ -401,7 +401,7 @@ pub fn install_wizard(vga: &mut Vga) -> bool {
             log!("wizard: no input, language = zh");
             break;
         }
-        sleep(5);
+        sleep(30);
     }
     let t: &Texts = if zh { &ZH } else { &EN };
 
@@ -433,7 +433,7 @@ pub fn install_wizard(vga: &mut Vga) -> bool {
             log!("wizard: no input, auto start install");
             break;
         }
-        sleep(5);
+        sleep(30);
     }
 
     // 2. EULA
@@ -462,7 +462,7 @@ pub fn install_wizard(vga: &mut Vga) -> bool {
             log!("wizard: EULA auto-accepted");
             break;
         }
-        sleep(5);
+        sleep(30);
     }
 
     // 3. 磁盘选择
@@ -490,7 +490,7 @@ pub fn install_wizard(vga: &mut Vga) -> bool {
             log!("wizard: auto select disk 0");
             break;
         }
-        sleep(5);
+        sleep(30);
     }
 
     // 4. 安装选项
@@ -542,7 +542,7 @@ pub fn install_wizard(vga: &mut Vga) -> bool {
             log!("wizard: auto use default options");
             break 'optloop;
         }
-        sleep(5);
+        sleep(30);
     }
 
     // 5. 确认
@@ -571,7 +571,7 @@ pub fn install_wizard(vga: &mut Vga) -> bool {
             log!("wizard: auto confirm install");
             break;
         }
-        sleep(5);
+        sleep(30);
     }
 
     // 6. 安装进度
@@ -627,6 +627,6 @@ pub fn install_wizard(vga: &mut Vga) -> bool {
             log!("wizard: auto enter system");
             return true;
         }
-        sleep(5);
+        sleep(30);
     }
 }

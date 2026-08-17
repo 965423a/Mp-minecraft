@@ -113,15 +113,24 @@ fn px(info: &FbInfo, x: u32, y: u32, color: u32) {
 
 /// 画一个逻辑格(x 为格列,y 为格行;ASCII 8x16,汉字 16x16)。
 fn draw_cell(info: &FbInfo, x: u32, y: u32, ch: u16, attr: u8) {
-    let fg = if attr & 0x08 != 0 { 0xFFFFFF } else { FG };
+    // TUI 反色选中项用 attr=0x70(黑字白底);高亮位 0x08 用纯白前景。
+    let invert = attr == 0x70;
+    let fg = if invert {
+        0x000000
+    } else if attr & 0x08 != 0 {
+        0xFFFFFF
+    } else {
+        FG
+    };
+    let bg = if invert { 0xFFFFFF } else { BG };
     if ch == 0 {
-        fill_cell(info, x, y, BG);
+        fill_cell(info, x, y, bg);
         return;
     }
     if ch < 0x80 {
         let c = ch as usize;
         if c < 0x20 || c > 0x7E {
-            fill_cell(info, x, y, BG);
+            fill_cell(info, x, y, bg);
             return;
         }
         let glyph = &ASCII8X16[(c - 0x20) * 16..(c - 0x20 + 1) * 16];
@@ -131,7 +140,7 @@ fn draw_cell(info: &FbInfo, x: u32, y: u32, ch: u16, attr: u8) {
                 if row & (0x80 >> b) != 0 {
                     px(info, x * 8 + b, y * 16 + r, fg);
                 } else {
-                    px(info, x * 8 + b, y * 16 + r, BG);
+                    px(info, x * 8 + b, y * 16 + r, bg);
                 }
             }
         }
@@ -139,17 +148,17 @@ fn draw_cell(info: &FbInfo, x: u32, y: u32, ch: u16, attr: u8) {
     }
     // 汉字:16x16,两格宽(x, x+1)
     let Some(g) = crate::hzk_glyph(ch) else {
-        fill_cell(info, x, y, BG);
-        fill_cell(info, x + 1, y, BG);
+        fill_cell(info, x, y, bg);
+        fill_cell(info, x + 1, y, bg);
         return;
     };
     for r in 0..16u32 {
         let left = g[(r * 2) as usize];
         let right = g[(r * 2 + 1) as usize];
         for b in 0..8u32 {
-            let lc = if left & (0x80 >> b) != 0 { fg } else { BG };
+            let lc = if left & (0x80 >> b) != 0 { fg } else { bg };
             px(info, x * 8 + b, y * 16 + r, lc);
-            let rc = if right & (0x80 >> b) != 0 { fg } else { BG };
+            let rc = if right & (0x80 >> b) != 0 { fg } else { bg };
             px(info, (x + 1) * 8 + b, y * 16 + r, rc);
         }
     }
