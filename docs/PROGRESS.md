@@ -70,6 +70,17 @@
   running + 已生成区块数;QEMU 验证:running=true chunks=12,ud=0。
 - 管理命令:tasks(任务表/就绪队列/核数),systemctl 绑定真实任务。
 
+- 服务器核心嵌入:mc-hotpath(C 热路径 varint/位打包,内核侧编译 native C)
+  + mc-protocol(协议编解码)链入内核;pkt 命令验证全链路:
+  varint C=R 交叉 1008/1008、Status 帧 roundtrip、真实区块位打包
+  → chunk-data 帧;服务器任务持续打包(生成 → 打包计数)。
+- 系统完善:任务退出机制(gen_task 完成 exit,槽位/栈内存回收,
+  连续 genworld 验证 allocs 256 frees 256);uptime/stats 命令
+  (切换计数/每核 tick);help 完整;无 klog 构建 kerr fallback。
+- switch 版本切换:注册表 1.0..26.2(真实协议号/数据版本/世界高度/
+  打包位数),switch 列版本/切换;status 响应与区块打包按当前版本
+  参数化;验证 1.12.2(proto=340,maxY=128)↔ 26.2(proto=776,maxY=384)。
+
 ## 决策记录(已定案)
 
 - 语言:Rust 主体 + C 热路径(varint/位打包/NBT),内核入口汇编最小必要。
