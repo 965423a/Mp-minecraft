@@ -1,6 +1,6 @@
 //! 服务器逻辑嵌入演示:mc-world 世界生成作为内核任务,多核并行。
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use mc_world::generator::{WorldGenerator, WorldType};
 
@@ -37,6 +37,60 @@ fn gen_task() -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+/// 服务化世界生成:mc-server.service 的真实内核任务。
+/// start 后持续生成区块(坐标轮转),stop 置标志后停止生成、空转。
+static SERVER_STOP: AtomicBool = AtomicBool::new(true);
+static SERVER_TASK: AtomicUsize = AtomicUsize::new(usize::MAX);
+static SERVER_CHUNKS: AtomicUsize = AtomicUsize::new(0);
+static SERVER_SEED: AtomicU64 = AtomicU64::new(0xC0FFEE);
+
+fn mc_server_task() -> ! {
+    let seed = SERVER_SEED.load(Ordering::Relaxed);
+    let wg = WorldGenerator::new(seed, WorldType::Normal);
+    let mut i = 0u64;
+    loop {
+        if SERVER_STOP.load(Ordering::Relaxed) {
+            core::hint::spin_loop();
+            continue;
+        }
+        let cx = (i % 64) as i32 - 32;
+        let cz = ((i / 64) % 64) as i32 - 32;
+        let chunk = wg.generate(cx, cz);
+        core::hint::black_box(chunk);
+        SERVER_CHUNKS.fetch_add(1, Ordering::Relaxed);
+        i += 1;
+    }
+}
+
+/// systemctl start mc-server.service:spawn 服务任务(幂等)。
+pub fn server_start(seed: u64) -> bool {
+    SERVER_SEED.store(seed, Ordering::Relaxed);
+    SERVER_STOP.store(false, Ordering::Relaxed);
+    if SERVER_TASK.load(Ordering::Relaxed) != usize::MAX {
+        return true;
+    }
+    match crate::sched::spawn(mc_server_task) {
+        Some(id) => {
+            SERVER_TASK.store(id as usize, Ordering::Relaxed);
+            true
+        }
+        None => false,
+    }
+}
+
+/// systemctl stop mc-server.service:停止生成(任务保留空转)。
+pub fn server_stop() {
+    SERVER_STOP.store(true, Ordering::Relaxed);
+}
+
+/// 服务状态与生成计数(systemctl status / tasks)。
+pub fn server_stats() -> (bool, usize) {
+    (
+        !SERVER_STOP.load(Ordering::Relaxed),
+        SERVER_CHUNKS.load(Ordering::Relaxed),
+    )
 }
 
 /// shell 命令:genworld [seed] [chunks_per_core]
