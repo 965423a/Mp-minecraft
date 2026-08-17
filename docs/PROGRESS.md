@@ -88,6 +88,14 @@
   执行,dbiso 验证实例隔离(ok),dbtest 双实例 CRUD 自检;
   QEMU 三服务(mc-server+mysqld+mariadb)90s 同跑 ud=0 bad=0。
 
+- 内存/NUMA 优化:连续分配改分桶(2^k 页块,块头 [len,next],
+  分配 O(#桶) 替代 O(帧数) 扫描,单帧链保留退化路径);
+  每节点独立锁(跨节点并行);NumaNode 与 per-CPU 原子
+  (CUR/PREEMPT/IDLE_SP/TICKS)64B 缓存行对齐防伪共享;
+  kalloc 与任务栈释放改批量 free_contig(保持连续性);
+  任务 exit 现在释放栈内存(修复泄漏);selftest 双节点
+  rw-check OK,genworld 128 块 allocs=frees 无泄漏,ud=0。
+
 ## 决策记录(已定案)
 
 - 语言:Rust 主体 + C 热路径(varint/位打包/NBT),内核入口汇编最小必要。
